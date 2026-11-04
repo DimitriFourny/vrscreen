@@ -13,7 +13,8 @@ do {
 }
 
 let queue = DispatchQueue(label: "quest-mirror.viewer", qos: .userInteractive)
-let client = ViewerClient(host: options.host, port: options.port, queue: queue)
+let discoverer = options.discover ? Discoverer(port: options.discoveryPort, queue: queue) : nil
+let client = ViewerClient(host: options.host, port: options.port, discoverer: discoverer, queue: queue)
 let decoder = VideoDecoder()
 let window: ViewerWindow? = options.headless ? nil : ViewerWindow()
 
@@ -60,7 +61,7 @@ client.onMessage = { message in
         do {
             try decoder.configure(config)
             if let window {
-                let text = "\(config.width)x\(config.height) \(config.codec) from \(options.host)"
+                let text = "\(config.width)x\(config.height) \(config.codec) from \(client.host)"
                 DispatchQueue.main.async { window.setStatus(text) }
             }
         } catch {
@@ -68,7 +69,8 @@ client.onMessage = { message in
         }
     case .frame(let frame):
         stats.received += 1
-        decoder.decode(frame)
+        decoder.decode(frame) // handed to the decoder, or dropped while waiting for a keyframe
+        client.acknowledgeFrame()
     default:
         break
     }

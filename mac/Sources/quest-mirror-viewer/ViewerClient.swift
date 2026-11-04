@@ -35,11 +35,13 @@ struct ClockSync {
 }
 
 /// TCP client for the mirror protocol. Reconnects every second while the sender is
-/// unreachable. All callbacks and state live on `queue`.
+/// unreachable; with a `Discoverer`, each (re)connect first finds the sender on the LAN.
+/// All callbacks and state live on `queue`.
 final class ViewerClient {
-    let host: String
-    let port: UInt16
+    private(set) var host: String
+    private(set) var port: UInt16
     let queue: DispatchQueue
+    private let discoverer: Discoverer?
     /// CONFIG / FRAME messages, in stream order.
     var onMessage: ((Message) -> Void)?
     var onDisconnected: (() -> Void)?
@@ -52,16 +54,32 @@ final class ViewerClient {
     private var reader = MessageReader(expectHello: true)
     private var pingTimer: DispatchSourceTimer?
     private var connected = false
+    /// FRAMEs consumed on the current connection (FRAME_ACK counter, wraps).
+    private var framesConsumed: UInt32 = 0
     private var reportedOutage = false
 
-    init(host: String, port: UInt16, queue: DispatchQueue) {
+    /// Connects to `host:port`, or, if `discoverer` is given, to whichever sender
+    /// answers discovery first (host/port are then filled in on each attempt).
+    init(host: String, port: UInt16, discoverer: Discoverer?, queue: DispatchQueue) {
         self.host = host
         self.port = port
+        self.discoverer = discoverer
         self.queue = queue
     }
 
     func start() {
-        queue.async { self.connect() }
+        queue.async { self.beginConnect() }
+    }
+
+    private func beginConnect() {
+        guard let discoverer else { return connect() }
+        discoverer.discover { [weak self] host, port, name in
+            guard let self else { return }
+            log("client: discovered \"\(name)\" at \(host), TCP port \(port)")
+            self.host = host
+            self.port = port
+            self.connect()
+        }
     }
 
     private func connect() {
@@ -69,6 +87,7 @@ final class ViewerClient {
         let gen = generation
         reader = MessageReader(expectHello: true)
         clock.reset()
+        framesConsumed = 0
         let tcp = NWProtocolTCP.Options()
         tcp.noDelay = true
         let conn = NWConnection(host: NWEndpoint.Host(host), port: NWEndpoint.Port(rawValue: port)!,
@@ -107,7 +126,7 @@ final class ViewerClient {
             reportedOutage = true
             log("client: disconnected (\(reason)); retrying every 1 s")
         }
-        queue.asyncAfter(deadline: .now() + 1) { [weak self] in self?.connect() }
+        queue.asyncAfter(deadline: .now() + 1) { [weak self] in self?.beginConnect() }
     }
 
     private func receive(_ conn: NWConnection, _ gen: Int) {
@@ -141,11 +160,20 @@ final class ViewerClient {
                           clientReceiveMicros: HostClock.nowMicros())
         case .config, .frame:
             onMessage?(message)
-        case .ping:
-            break // Client-to-server type.
+        case .ping, .frameAck:
+            break // Client-to-server types.
         case .unknown:
             break // Forward compatibility: skip unknown types.
         }
+    }
+
+    /// Reports one more FRAME of this connection as consumed (handed to the decoder
+    /// or discarded) with a FRAME_ACK, so the sender can bound frames in flight.
+    func acknowledgeFrame() {
+        guard let conn = connection, connected else { return }
+        framesConsumed &+= 1
+        conn.send(content: Message.frameAck(framesConsumed: framesConsumed).encoded(),
+                  completion: .contentProcessed { _ in })
     }
 
     /// One PING right away and a few more quickly for a good first offset, then 1/s.

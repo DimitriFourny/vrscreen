@@ -37,6 +37,7 @@ public enum MessageType: UInt8, Sendable {
     case frame = 0x02
     case ping = 0x10
     case pong = 0x11
+    case frameAck = 0x12
 }
 
 /// `0x01 CONFIG`: `codec u8 | width u32 | height u32 | parameter sets (Annex-B)`.
@@ -79,6 +80,9 @@ public enum Message: Equatable, Sendable {
     case ping(clientTimeMicros: UInt64)
     /// Server → client; `serverTimeMicros` is on the same clock as `captureTimeMicros`.
     case pong(clientTimeMicros: UInt64, serverTimeMicros: UInt64)
+    /// Client → server: cumulative number of FRAMEs on this connection the client
+    /// has consumed (handed to its decoder or discarded). Wraps at 2^32.
+    case frameAck(framesConsumed: UInt32)
     /// A message type this implementation does not know; receivers skip it.
     case unknown(type: UInt8, payload: Data)
 
@@ -107,6 +111,9 @@ public enum Message: Equatable, Sendable {
             type = MessageType.pong.rawValue
             payload.appendBigEndian(c)
             payload.appendBigEndian(s)
+        case .frameAck(let n):
+            type = MessageType.frameAck.rawValue
+            payload.appendBigEndian(n)
         case .unknown(let t, let p):
             type = t
             payload = p
@@ -149,6 +156,11 @@ public enum Message: Equatable, Sendable {
                 throw .malformed(type: type, reason: "PONG payload shorter than 16 bytes")
             }
             return .pong(clientTimeMicros: c, serverTimeMicros: s)
+        case .frameAck:
+            guard let n = r.u32() else {
+                throw .malformed(type: type, reason: "FRAME_ACK payload shorter than 4 bytes")
+            }
+            return .frameAck(framesConsumed: n)
         }
     }
 }
@@ -239,6 +251,7 @@ struct ByteReader {
     }
 
     mutating func u8() -> UInt8? { integer(UInt8.self) }
+    mutating func u16() -> UInt16? { integer(UInt16.self) }
     mutating func u32() -> UInt32? { integer(UInt32.self) }
     mutating func u64() -> UInt64? { integer(UInt64.self) }
 

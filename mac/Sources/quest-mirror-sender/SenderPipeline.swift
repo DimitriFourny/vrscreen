@@ -3,7 +3,8 @@ import Foundation
 import MirrorProtocol
 
 /// Capture → encode → send, with backpressure that never drops encoded frames:
-/// while the client's unsent backlog (or the encoder queue) is full, new captures
+/// while the client's window is full (unsent socket backlog, or for clients that
+/// send FRAME_ACK, frames not yet consumed) or the encoder is busy, new captures
 /// are not encoded; only the latest capture is kept and is encoded as soon as
 /// there is room, so the final state of a now-static screen is never lost.
 /// All methods must be called on `queue`.
@@ -45,6 +46,8 @@ final class SenderPipeline {
         /// Captures replaced by a newer one before they could be encoded.
         var skipped = 0
         var keyframes = 0
+        /// Highest FRAME_ACK in-flight count right after a send.
+        var maxInFlight: UInt32 = 0
     }
 
     init(queue: DispatchQueue, encoder: VideoEncoder, server: MirrorServer) {
@@ -55,6 +58,7 @@ final class SenderPipeline {
             client.needsKeyframe = true
             self?.pump()
         }
+        server.onFrameAck = { [weak self] _ in self?.pump() }
     }
 
     /// A new captured image (only frames that carry an image).
@@ -74,7 +78,11 @@ final class SenderPipeline {
     private func pump() {
         guard let client = server.activeClient, let latest else { return }
         guard latest.sequence > lastEncodedSequence || client.needsKeyframe else { return }
-        guard client.framesUnsent < Self.maxUnsentFrames, framesEncoding < Self.maxEncodingFrames else { return }
+        // Clients that send FRAME_ACK are limited by frames in flight (sent, not yet
+        // consumed); others only by the socket backlog. The first frame for a new
+        // client always fits: its window starts empty.
+        guard client.framesUnsent < Self.maxUnsentFrames, client.ackWindow.isOpen,
+              framesEncoding < Self.maxEncodingFrames else { return }
         let forceKeyframe = client.needsKeyframe
         client.needsKeyframe = false
         lastEncodedSequence = latest.sequence
@@ -117,6 +125,7 @@ final class SenderPipeline {
                 client.framesUnsent -= 1
                 self?.pump()
             }
+            stats.maxInFlight = max(stats.maxInFlight, client.ackWindow.framesInFlight)
         }
         pump()
     }
@@ -131,7 +140,11 @@ final class SenderPipeline {
         totalSkipped += stats.skipped
         let clientText: String
         if let c = server.activeClient {
-            clientText = "client \(c.address) | backlog \(c.framesUnsent) frames \(c.unsentBytes / 1024) KiB"
+            var text = "client \(c.address) | backlog \(c.framesUnsent) frames \(c.unsentBytes / 1024) KiB"
+            if c.ackWindow.isActive {
+                text += " | in flight \(c.ackWindow.framesInFlight)/\(c.ackWindow.limit) (max \(stats.maxInFlight))"
+            }
+            clientText = text
         } else {
             clientText = "no client"
         }

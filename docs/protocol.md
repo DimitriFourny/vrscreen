@@ -9,12 +9,68 @@ the Mac test viewer (`quest-mirror-viewer`) and the Quest app (C++/NDK,
 - Plain TCP. The **sender is the server**: it listens on `0.0.0.0`, port **7777** by
   default (`--port`), with `TCP_NODELAY` set.
 - Over USB: run `adb reverse tcp:7777 tcp:7777` on the Mac; the Quest app connects to
-  `127.0.0.1:7777`. Over Wi-Fi: the Quest app connects to `<Mac IP>:7777`. The
-  byte stream is identical in both cases.
+  `127.0.0.1:7777`. Over Wi-Fi: the Quest app connects to `<Mac IP>:7777`, found with
+  the UDP discovery below. The byte stream is identical in both cases.
 - **One active client.** When a new client connects, the server closes the
   previous connection. Clients should reconnect automatically (the Mac viewer
   retries every 1 s), which also covers sender restarts.
 - There is no authentication or encryption. Use it on trusted links only.
+
+## Discovery (UDP)
+
+Lets a client on the same LAN find the sender without knowing its IP address. All
+integers big-endian, as for TCP.
+
+- The sender listens on UDP `0.0.0.0:7778` (`--discovery-port`; `--no-discovery`
+  turns it off).
+- While not connected, the client sends DISCOVER **once per second** to
+  `255.255.255.255` **and** the directed broadcast address of its subnet (e.g.
+  `192.168.1.255` for `192.168.1.35/24`), UDP port 7778. Sockets need `SO_BROADCAST`.
+- The sender answers **every** valid DISCOVER with one ANNOUNCE, **unicast to the
+  datagram's source address and port**, so the client just reads replies on the
+  socket it sent from (no multicast lock or broadcast reception needed). A client may
+  get several ANNOUNCEs for one round (one per broadcast address, or several Macs).
+- Receivers ignore datagrams with the wrong magic, another version, an unknown type,
+  or a malformed body. Bytes after the defined fields are ignored (forward
+  compatibility).
+
+DISCOVER (client → broadcast), 7 bytes:
+
+| Offset | Size | Field   | Value                        |
+|-------:|-----:|---------|------------------------------|
+| 0      | 4    | magic   | ASCII `QMIR` = `51 4D 49 52` |
+| 4      | 1    | type    | `0x01` DISCOVER              |
+| 5      | 2    | version | `u16` = `1`                  |
+
+ANNOUNCE (sender → client, unicast), 10 + `nameLen` bytes:
+
+| Offset | Size      | Field   | Value                                                  |
+|-------:|----------:|---------|--------------------------------------------------------|
+| 0      | 4         | magic   | ASCII `QMIR`                                           |
+| 4      | 1         | type    | `0x02` ANNOUNCE                                        |
+| 5      | 2         | version | `u16` = `1`                                            |
+| 7      | 2         | tcpPort | `u16`, the sender's TCP port                           |
+| 9      | 1         | nameLen | `u8`, 0-63                                             |
+| 10     | `nameLen` | name    | UTF-8, the Mac's computer name (cut at a character boundary) |
+
+The sender's address is the ANNOUNCE's **source IP**; connect to `sourceIP:tcpPort`.
+
+Examples:
+
+```
+DISCOVER:                       51 4D 49 52 01 00 01
+ANNOUNCE port 7777, name "Mac": 51 4D 49 52 02 00 01 1E 61 03 4D 61 63
+```
+
+Client connection policy (informative; what the Quest app does):
+
+1. If `debug.questmirror.host` is set, connect only there.
+2. Otherwise try `127.0.0.1:<port>` first: with `adb reverse` set up this is the USB
+   tunnel, and without it the connection is refused at once.
+3. Otherwise connect to the first sender that ANNOUNCEs.
+
+Once connected, a client stays on that connection (no switching mid-stream); it goes
+through the same steps again only after the connection is lost.
 
 ## Encoding rules
 
@@ -49,7 +105,7 @@ Every message is:
   continuing with the next message. This is how later protocol revisions add messages
   without breaking v1 clients. Both sides follow this rule.
 - Receivers MUST ignore flag bits they do not know, and any payload bytes beyond the
-  fields defined below for PING and PONG.
+  fields defined below for PING, PONG and FRAME_ACK.
 - Receivers may treat `length > 64 MiB` (67 108 864) as a protocol error and close the
   connection. Real messages are far smaller (a 4K keyframe is typically 150-500 KB).
 
@@ -59,6 +115,7 @@ Every message is:
 | `0x02` | FRAME  | server → client |
 | `0x10` | PING   | client → server |
 | `0x11` | PONG   | server → client |
+| `0x12` | FRAME_ACK | client → server |
 
 ### `0x01` CONFIG
 
@@ -138,6 +195,27 @@ One encoded picture.
 
 The server answers every PING with one PONG.
 
+### `0x12` FRAME_ACK (client → server)
+
+| Payload offset | Size | Field          | Notes                                         |
+|---------------:|-----:|----------------|-----------------------------------------------|
+| 0              | 4    | framesConsumed | `u32`, cumulative count, see below            |
+
+`framesConsumed` is the number of FRAME messages received **on this connection** that
+the client is done with: handed to its decoder (e.g. queued as a `MediaCodec` input
+buffer) **or deliberately discarded** (e.g. dropped while waiting for a keyframe
+after a CONFIG). It starts at 0 for every connection and wraps around at 2^32.
+
+- Send a FRAME_ACK after every consumed FRAME. Acknowledging several frames with one
+  FRAME_ACK (the latest count) is allowed.
+- Every FRAME must eventually be counted. Once a client has acknowledged anything,
+  the server sends at most a few unacknowledged FRAMEs, so a FRAME that is never
+  counted stalls the stream for the rest of the connection.
+- The count never goes backwards and never exceeds the number of FRAMEs received.
+  The server ignores FRAME_ACKs that violate this.
+- FRAME_ACK is optional. A client that never sends it keeps working; the server then
+  only bounds its socket backlog (see "Flow control").
+
 ## Clocks and latency measurement
 
 `captureTimeMicros` and `serverTimeMicros` are on the **sender clock**: the macOS host
@@ -188,16 +266,32 @@ capture → display latency = (t + offset) - captureTimeMicros
 - While frames flow, a keyframe is produced at least every ~5 s (sender
   `--keyframe-interval`) as a safety net.
 
-## Flow control (informative)
+## Flow control
 
-The sender keeps a small backlog per client: at most 2 encoded FRAMEs waiting to be
-written to its socket, plus a fixed 128 KiB kernel send buffer. While the backlog is
-full it skips **encoding** new captures (never dropping encoded frames, so the
-reference chain stays intact), keeps only the newest capture, and encodes that one
-as soon as the backlog drains. A slow link therefore lowers the frame rate instead of
-growing latency. Data waiting in the *client's* receive buffer is latency the sender
-cannot see: clients should read the socket promptly (e.g. on a dedicated thread) and
-hand frames to the decoder without queueing.
+The sender never drops an encoded frame (the decoder's reference chain must stay
+intact). Instead, while a client's window is full it skips **encoding** new captures,
+keeps only the newest one, and encodes that as soon as the window opens, so the final
+state of a screen that just became static is always delivered. A slow link or a slow
+decoder therefore lowers the frame rate instead of growing latency. Two windows exist:
+
+1. **Frames in flight (clients that send FRAME_ACK).** After a client's first
+   FRAME_ACK, the sender keeps `FRAMEs sent − framesConsumed` at or below a small limit
+   (default **3**, sender option `--max-in-flight`). This bounds latency end to end,
+   including data buffered anywhere between the two sockets (e.g. inside adb's USB
+   tunnel) and frames waiting in the client. Before the first FRAME_ACK of a
+   connection the window does not apply; the keyframe sent on connect always goes out.
+2. **Socket backlog (all clients).** At most 2 encoded FRAMEs waiting to be written to
+   the server socket, plus a fixed kernel send buffer: 128 KiB until the client's first
+   FRAME_ACK, 512 KiB after it (the ack window then bounds latency, and 128 KiB would
+   cap Wi-Fi TCP at about 120 Mbit/s). This is the only limit for clients that never
+   acknowledge. It cannot see data that has already left the sender's socket: bytes
+   buffered in a proxy (`adb reverse` over USB buffers about 3.5 MB before the sender's
+   socket blocks, measured with adb 37.0.1, i.e. ~1 s at 30 Mbit/s and far more at
+   desktop bitrates) or in the client's receive buffer (about 0.75 MB on a Quest 3 over
+   Wi-Fi) add latency undetected, which is why FRAME_ACK exists.
+
+Clients should read the socket promptly (e.g. on a dedicated thread) and acknowledge
+frames as they hand them to the decoder.
 
 ## Example byte sequences
 
@@ -207,6 +301,12 @@ PING with `clientTimeMicros = 0x0A0B0C0D0E0F1011`:
 
 ```
 10 00 00 00 08 0A 0B 0C 0D 0E 0F 10 11
+```
+
+FRAME_ACK with `framesConsumed = 42`:
+
+```
+12 00 00 00 04 00 00 00 2A
 ```
 
 FRAME, keyframe, `captureTimeMicros = 2`, access unit `00 00 00 01 26 01 ...`:
@@ -221,10 +321,13 @@ FRAME, keyframe, `captureTimeMicros = 2`, access unit `00 00 00 01 26 01 ...`:
 server → client  hello  QMIR 0001
 server → client  CONFIG codec=2 3840x2160 (VPS SPS PPS, ~100 B)
 server → client  FRAME  key=1 (VPS SPS PPS + IDR slices)
+client → server  FRAME_ACK 1
 client → server  PING
 server → client  PONG
 server → client  FRAME  key=0 ...
+client → server  FRAME_ACK 2
 ...              (pause while the screen is static)
 server → client  CONFIG codec=2 2560x1440 (display resolution changed)
 server → client  FRAME  key=1 ...
+client → server  FRAME_ACK 3
 ```

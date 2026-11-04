@@ -15,8 +15,9 @@ do {
 let queue = DispatchQueue(label: "quest-mirror.sender", qos: .userInteractive)
 let encoder = VideoEncoder(codec: options.codec, bitrate: Int(options.bitrateMbps * 1_000_000),
                            fps: options.fps, keyframeIntervalSeconds: options.keyframeIntervalSeconds)
-let server = MirrorServer(port: options.port, queue: queue)
+let server = MirrorServer(port: options.port, maxFramesInFlight: UInt32(options.maxFramesInFlight), queue: queue)
 let pipeline = SenderPipeline(queue: queue, encoder: encoder, server: server)
+let discovery = options.discoveryPort.map { DiscoveryResponder(port: $0, tcpPort: options.port, queue: queue) }
 let deliver: (CVPixelBuffer, UInt64) -> Void = { buffer, micros in pipeline.handleCapture(buffer, captureMicros: micros) }
 
 var testSource: TestPatternSource?
@@ -25,6 +26,7 @@ var screenSource: ScreenSource?
 queue.async {
     do {
         try server.start()
+        try discovery?.start()
         switch options.source {
         case .test:
             let source = TestPatternSource(width: options.width, height: options.height, fps: options.fps,
@@ -66,6 +68,7 @@ for sig in [SIGINT, SIGTERM] {
         statsTimer.cancel()
         testSource?.stop()
         server.stop()
+        discovery?.stop()
         pipeline.stop()
         if let screen = screenSource {
             screen.stop { exit(0) }

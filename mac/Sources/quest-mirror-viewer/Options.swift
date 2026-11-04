@@ -4,6 +4,8 @@ import MirrorProtocol
 struct ViewerOptions {
     var host = "127.0.0.1"
     var port: UInt16 = WireProtocol.defaultPort
+    var discover = false
+    var discoveryPort: UInt16 = DiscoveryMessage.defaultPort
     var headless = false
     var snapshotPath: String?
     var exitAfterSnapshot = false
@@ -14,6 +16,9 @@ struct ViewerOptions {
 
       --host HOST              Sender address (default 127.0.0.1).
       --port N                 Sender port (default 7777).
+      --discover               Find the sender on the LAN (UDP broadcast) instead of
+                               --host/--port; re-discovers on every reconnect.
+      --discovery-port N       UDP discovery port (default 7778).
       --headless               No window: decode and print stats only.
       --snapshot PATH.png      Write the first decoded frame as PNG.
       --exit-after-snapshot    Exit once the snapshot is written.
@@ -35,6 +40,11 @@ struct ViewerOptions {
                 let s = try value(arg)
                 guard let p = UInt16(s), p > 0 else { throw OptionError("--port: invalid value '\(s)'") }
                 o.port = p
+            case "--discover": o.discover = true
+            case "--discovery-port":
+                let s = try value(arg)
+                guard let p = UInt16(s), p > 0 else { throw OptionError("--discovery-port: invalid value '\(s)'") }
+                o.discoveryPort = p
             case "--headless": o.headless = true
             case "--snapshot": o.snapshotPath = try value(arg)
             case "--exit-after-snapshot": o.exitAfterSnapshot = true

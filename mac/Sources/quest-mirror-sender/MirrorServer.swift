@@ -12,8 +12,10 @@ import MirrorProtocol
 final class ClientSession {
     let address: String
     /// FRAME messages queued for this client and not yet fully written to the
-    /// socket. Drives backpressure.
+    /// socket. Drives backpressure for clients that do not send FRAME_ACK.
     var framesUnsent = 0
+    /// FRAMEs sent vs. acknowledged; limits frames in flight once the client acks.
+    fileprivate(set) var ackWindow: FrameAckWindow
     /// The next encode for this client must be a keyframe.
     var needsKeyframe = true
     /// Last CONFIG sent on this connection.
@@ -27,9 +29,10 @@ final class ClientSession {
     fileprivate var writeSource: DispatchSourceWrite?
     fileprivate var writeSourceRunning = false
 
-    fileprivate init(fd: Int32, address: String) {
+    fileprivate init(fd: Int32, address: String, maxFramesInFlight: UInt32) {
         self.fd = fd
         self.address = address
+        ackWindow = FrameAckWindow(limit: maxFramesInFlight)
     }
 
     /// Bytes accepted by `send` but not yet handed to the kernel.
@@ -38,15 +41,24 @@ final class ClientSession {
 
 /// TCP server on 0.0.0.0: one active client, a new connection replaces the previous one.
 final class MirrorServer {
-    /// Kernel send buffer cap (unsent + unacknowledged): ~35 ms at 30 Mbit/s, still
-    /// above the bandwidth-delay product of USB or a local Wi-Fi link (30 Mbit/s at
-    /// up to ~35 ms RTT). Disables macOS send-buffer auto-tuning (up to 4 MiB).
+    /// Kernel send buffer cap (unsent + unacknowledged) for clients that do not send
+    /// FRAME_ACK: ~35 ms at 30 Mbit/s, the latency bound for them. Disables macOS
+    /// send-buffer auto-tuning (up to 4 MiB).
     static let socketSendBuffer: Int32 = 128 * 1024
+    /// Once a client acknowledges frames, the ack window bounds latency instead, and a
+    /// larger buffer stops TCP from being window-limited on Wi-Fi: measured to a Quest 3
+    /// on 5 GHz, 128 KiB caps throughput at ~120 Mbit/s, 512 KiB reaches ~285 Mbit/s
+    /// (a 200 KB 4K keyframe goes out in ~6 ms instead of ~13 ms).
+    static let ackedSocketSendBuffer: Int32 = 512 * 1024
 
     let port: UInt16
     let queue: DispatchQueue
+    /// FRAME_ACK window: frames sent but not yet acknowledged, per client.
+    let maxFramesInFlight: UInt32
     /// Called on `queue` right after a client connected and was sent hello (+ cached CONFIG).
     var onClientReady: ((ClientSession) -> Void)?
+    /// Called on `queue` after a valid FRAME_ACK (the window may have opened).
+    var onFrameAck: ((ClientSession) -> Void)?
     /// Most recent CONFIG produced by the encoder; sent right after the hello.
     var cachedConfig: ConfigMessage?
 
@@ -56,8 +68,9 @@ final class MirrorServer {
     private var acceptSource: DispatchSourceRead?
     private var readBuffer = [UInt8](repeating: 0, count: 64 * 1024)
 
-    init(port: UInt16, queue: DispatchQueue) {
+    init(port: UInt16, maxFramesInFlight: UInt32, queue: DispatchQueue) {
         self.port = port
+        self.maxFramesInFlight = maxFramesInFlight
         self.queue = queue
     }
 
@@ -105,6 +118,7 @@ final class MirrorServer {
     @discardableResult
     func send(_ message: Message, to client: ClientSession, completion: (() -> Void)? = nil) -> Bool {
         guard client.isActive else { return false }
+        if case .frame = message { client.ackWindow.recordSent() }
         enqueue(message.encoded(), to: client, completion: completion)
         return true
     }
@@ -123,7 +137,7 @@ final class MirrorServer {
                 return
             }
             configure(fd)
-            let client = ClientSession(fd: fd, address: describe(addr))
+            let client = ClientSession(fd: fd, address: describe(addr), maxFramesInFlight: maxFramesInFlight)
             if let previous = activeClient {
                 drop(previous, reason: "replaced by \(client.address)")
             }
@@ -247,6 +261,20 @@ final class MirrorServer {
         switch message {
         case .ping(let clientTime):
             send(.pong(clientTimeMicros: clientTime, serverTimeMicros: HostClock.nowMicros()), to: client)
+        case .frameAck(let consumed):
+            let wasActive = client.ackWindow.isActive
+            guard client.ackWindow.recordAck(framesConsumed: consumed) else {
+                log("server: client \(client.address) sent invalid FRAME_ACK \(consumed) "
+                    + "(acked \(client.ackWindow.framesAcked), sent \(client.ackWindow.framesSent)); ignored")
+                return
+            }
+            if !wasActive {
+                var size = Self.ackedSocketSendBuffer
+                setsockopt(client.fd, SOL_SOCKET, SO_SNDBUF, &size, socklen_t(MemoryLayout<Int32>.size))
+                log("server: client \(client.address) acknowledges frames; at most \(maxFramesInFlight) in flight, "
+                    + "send buffer \(size / 1024) KiB")
+            }
+            onFrameAck?(client)
         case .unknown:
             break // Forward compatibility: skip unknown types.
         case .config, .frame, .pong:

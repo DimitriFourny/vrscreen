@@ -12,6 +12,8 @@ private let sampleMessages: [Message] = [
     .unknown(type: 0x55, payload: Data()),
     .ping(clientTimeMicros: 123_456_789),
     .pong(clientTimeMicros: 1, serverTimeMicros: .max),
+    .frameAck(framesConsumed: 0xFFFF_FFFF),
+    .frameAck(framesConsumed: 1),
     .config(ConfigMessage(codec: .h264, width: 1920, height: 1080, parameterSets: Data())),
 ]
 
@@ -43,6 +45,14 @@ private func parse(_ data: Data, chunkSizes: [Int]) throws -> [Message] {
     #expect(ping == Data([0x10, 0, 0, 0, 8, 0x0A, 0x0B, 0x0C, 0x0D, 0x0E, 0x0F, 0x10, 0x11]))
     let frame = Message.frame(FrameMessage(isKeyframe: true, captureTimeMicros: 2, accessUnit: Data([9]))).encoded()
     #expect(frame == Data([0x02, 0, 0, 0, 10, 0x01, 0, 0, 0, 0, 0, 0, 0, 2, 9]))
+    let ack = Message.frameAck(framesConsumed: 0x0102_0304).encoded()
+    #expect(ack == Data([0x12, 0, 0, 0, 4, 0x01, 0x02, 0x03, 0x04]))
+}
+
+@Test func frameAckPayloadRules() throws {
+    // Bytes beyond the defined field are ignored (forward compatibility).
+    #expect(try Message.decode(type: 0x12, payload: Data([0, 0, 0, 7, 0xAA])) == .frameAck(framesConsumed: 7))
+    #expect(throws: ProtocolError.self) { try Message.decode(type: 0x12, payload: Data([0, 0, 7])) }
 }
 
 @Test(arguments: [[Int.max], [1], [2, 3], [5], [6], [7, 1, 4096], [13, 1, 1, 999]])

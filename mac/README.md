@@ -55,15 +55,19 @@ Stop either with Ctrl-C.
 | `--source screen\|test`    | screen  | ScreenCaptureKit capture, or the synthetic test pattern       |
 | `--display N`              | main    | Display index, from the list printed at startup              |
 | `--port N`                 | 7777    | TCP listen port (all interfaces)                             |
+| `--discovery-port N`       | 7778    | UDP port answering LAN discovery (DISCOVER → ANNOUNCE)       |
+| `--no-discovery`           | off     | Do not answer LAN discovery                                  |
 | `--fps N`                  | 60      | Target frame rate                                            |
 | `--max-width N`            | 3840    | Scale the display's native pixel size down to fit this width |
 | `--codec hevc\|h264`       | hevc    | Video codec                                                  |
 | `--bitrate MBPS`           | 30      | Average bitrate, Mbit/s                                      |
 | `--keyframe-interval S`    | 5       | Maximum seconds between keyframes                            |
+| `--max-in-flight N`        | 3       | For clients that send FRAME_ACK: max frames sent but not yet consumed |
 | `--width N --height N`     | 1920x1080 | Test-pattern size                                          |
 
 Once per second it logs capture fps, encoded fps (and keyframes), captures skipped by
-backpressure, the bitrate actually sent, and the client with its unsent backlog.
+backpressure, the bitrate actually sent, and the client with its unsent backlog and,
+for clients that send FRAME_ACK, frames in flight (current/limit and the per-second max).
 
 ### Viewer options
 
@@ -71,6 +75,8 @@ backpressure, the bitrate actually sent, and the client with its unsent backlog.
 |-------------------------|-----------|------------------------------------------|
 | `--host HOST`           | 127.0.0.1 | Sender address                           |
 | `--port N`              | 7777      | Sender port                              |
+| `--discover`            | off       | Find the sender by UDP broadcast instead of `--host`/`--port` (again on every reconnect) |
+| `--discovery-port N`    | 7778      | UDP discovery port                       |
 | `--headless`            | off       | No window; decode and print stats        |
 | `--snapshot PATH.png`   | none      | Write the first decoded frame as PNG     |
 | `--exit-after-snapshot` | off       | Exit once the snapshot is written        |
@@ -78,8 +84,9 @@ backpressure, the bitrate actually sent, and the client with its unsent backlog.
 
 Once per second it logs received and decoded fps, bitrate, capture→decoded latency
 (avg/max, measured through the PING/PONG clock offset the way the Quest client does
-it), the last PING round trip, and the stream format. It reconnects every second
-while the sender is unreachable or after the sender restarts.
+it), the last PING round trip, and the stream format. It acknowledges every FRAME
+(FRAME_ACK) as it hands it to the decoder, and reconnects every second while the
+sender is unreachable or after the sender restarts.
 
 ## Screen Recording permission
 
@@ -98,18 +105,42 @@ needs no permission at all.
 
 ## Using it with the Quest
 
-USB (lowest latency, no Wi-Fi involved):
+One command from the repo root, for USB and Wi-Fi alike:
+
+```sh
+scripts/mirror.sh                  # headset on USB: adb reverse + launch app; always: sender with discovery
+scripts/mirror.sh --install        # also build and install the Quest app first (USB)
+scripts/mirror.sh --no-launch --codec h264   # app already running; extra args go to the sender
+scripts/mirror.sh --wifi-only      # never touch adb; the headset finds the Mac over Wi-Fi
+```
+
+The script:
+
+- sets `ADB_MDNS=0` (adb 37.0.1's mDNS backend crashes the adb server);
+- if exactly one authorized headset is attached over USB (`--serial` to choose), sets up
+  `adb reverse tcp:7777 tcp:7777` (`--port` to change; the app is then told via the
+  `debug.questmirror.port` property) and launches the app unless `--no-launch`;
+  without a usable USB headset it carries on for Wi-Fi;
+- always runs the sender with LAN discovery (UDP 7778, `--discovery-port`) and prints
+  how the headset will connect (USB tunnel first, else Wi-Fi to the Mac's addresses);
+- on Ctrl-C stops the sender and removes the reverse it created (a reverse that already
+  existed is left alone).
+
+By hand, USB is:
 
 ```sh
 adb reverse tcp:7777 tcp:7777
 .build/release/quest-mirror-sender
 ```
 
-The Quest app then connects to `127.0.0.1:7777`; adb forwards it to the Mac. Re-run
-`adb reverse` after reconnecting the headset or restarting adb.
+The Quest app tries `127.0.0.1:7777` first (the adb tunnel); re-run `adb reverse` after
+reconnecting the headset or restarting adb. Over Wi-Fi it broadcasts DISCOVER on UDP
+7778 and connects to the first Mac that answers; the sender answers by default. Test it
+Mac-only with `quest-mirror-viewer --discover`.
 
-Wi-Fi: start the sender and point the Quest app at the Mac's IP address, port 7777.
-macOS may ask to allow incoming connections the first time.
+Measured on a 5 GHz network to a Quest 3: ping RTT avg 11 ms at 5 pings/s (36 ms at
+1/s, with spikes over 100 ms, likely Wi-Fi power saving), TCP about 285 Mbit/s, versus
+about 550 Mbit/s through the USB tunnel.
 
 ## Design notes
 
@@ -123,11 +154,18 @@ macOS may ask to allow incoming connections the first time.
 - **Keyframes**: forced for every newly connected client (re-encoding the latest
   capture, so a static screen shows up at once), and at most every 5 s while frames
   flow. Keyframes carry the parameter sets.
-- **Backpressure**: the sender uses a plain BSD socket with a fixed 128 KiB send
-  buffer instead of `NWConnection`: NWConnection reports sends as done once they reach
-  the auto-tuned kernel buffer (up to 4 MiB), which hid seconds of backlog in testing.
-  While two encoded frames are still unsent, new captures are not encoded; only the
-  newest is kept and encoded once the backlog drains. Encoded frames are never dropped.
+- **Backpressure**: encoded frames are never dropped; while a client's window is full,
+  new captures are not encoded, only the newest is kept and encoded once the window
+  opens. Two windows apply:
+  - *FRAME_ACK* (clients that acknowledge, like this viewer and the Quest app): at most
+    `--max-in-flight` (3) frames sent but not yet consumed. Needed over USB: adb's
+    tunnel buffers about 3.5 MB before the sender's socket blocks (measured), i.e.
+    seconds of video at desktop bitrates that the socket alone cannot see.
+  - *Socket backlog* (all clients): at most two encoded frames unsent, plus a fixed
+    send buffer on a plain BSD socket: 128 KiB (the latency bound for clients that
+    never ack), raised to 512 KiB once a client acks (128 KiB caps Wi-Fi TCP at about
+    120 Mbit/s). `NWConnection` was not used because it reports sends as done once they
+    reach the auto-tuned kernel buffer (up to 4 MiB).
 - **Encoding thread**: the low-latency encoder encodes synchronously inside
   `VTCompressionSessionEncodeFrame` (~15 ms at 4K on an M-series Mac), so it runs on its
   own queue, one frame at a time, and does not delay networking or PONGs.

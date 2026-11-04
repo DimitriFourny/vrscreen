@@ -7,11 +7,14 @@ struct SenderOptions {
     var source: Source = .screen
     var displayIndex: Int?
     var port: UInt16 = WireProtocol.defaultPort
+    /// UDP port for DISCOVER/ANNOUNCE; nil with --no-discovery.
+    var discoveryPort: UInt16? = DiscoveryMessage.defaultPort
     var fps = 60
     var maxWidth = 3840
     var codec: VideoCodec = .hevc
     var bitrateMbps = 30.0
     var keyframeIntervalSeconds = 5.0
+    var maxFramesInFlight = 3
     var width = 1920
     var height = 1080
 
@@ -23,11 +26,15 @@ struct SenderOptions {
       --display N              Display index from the list printed at startup
                                (default: the main display).
       --port N                 TCP listen port (default 7777).
+      --discovery-port N       UDP port answering LAN discovery (default 7778).
+      --no-discovery           Do not answer LAN discovery.
       --fps N                  Target frame rate (default 60).
       --max-width N            Scale the display down to fit this width (default 3840).
       --codec hevc|h264        Video codec (default hevc).
       --bitrate MBPS           Average bitrate in Mbit/s (default 30).
       --keyframe-interval S    Max seconds between keyframes (default 5).
+      --max-in-flight N        For clients that send FRAME_ACK: max frames sent but
+                               not yet consumed by the client (default 3).
       --width N --height N     Test source size (default 1920x1080).
       -h, --help               Show this help.
     """
@@ -60,6 +67,11 @@ struct SenderOptions {
                 let p = try int(arg)
                 guard let port = UInt16(exactly: p) else { throw OptionError("--port out of range") }
                 o.port = port
+            case "--discovery-port":
+                let p = try int(arg)
+                guard let port = UInt16(exactly: p) else { throw OptionError("--discovery-port out of range") }
+                o.discoveryPort = port
+            case "--no-discovery": o.discoveryPort = nil
             case "--fps": o.fps = try int(arg)
             case "--max-width": o.maxWidth = try int(arg, min: 16)
             case "--codec":
@@ -70,6 +82,7 @@ struct SenderOptions {
                 }
             case "--bitrate": o.bitrateMbps = try double(arg)
             case "--keyframe-interval": o.keyframeIntervalSeconds = try double(arg)
+            case "--max-in-flight": o.maxFramesInFlight = try int(arg)
             case "--width": o.width = try int(arg, min: 16) & ~1
             case "--height": o.height = try int(arg, min: 16) & ~1
             case "-h", "--help":
