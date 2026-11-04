@@ -21,9 +21,9 @@ export ANDROID_HOME=$HOME/Library/Android/sdk   # or put sdk.dir in local.proper
 The OpenXR loader and headers come from Maven (`org.khronos.openxr:openxr_loader_for_android`,
 prefab); no Meta SDK is used.
 
-Host unit tests (gesture state machine, `facing()` near the zenith, highlight geometry, hello and
-discovery framing; plain CMake + the host compiler, using the OpenXR headers Gradle extracted, so
-build the APK once first):
+Host unit tests (gesture state machine, `facing()` near the zenith, highlight geometry, hello,
+discovery and AUDIO_CONFIG framing, the audio jitter buffer/playout scheduler; plain CMake + the
+host compiler, using the OpenXR headers Gradle extracted, so build the APK once first):
 
 ```sh
 cmake -S tests -B build/host-tests && cmake --build build/host-tests && ctest --test-dir build/host-tests --output-on-failure
@@ -107,6 +107,50 @@ Measured on this Quest 3 (HEVC, Mac on 5 GHz Wi-Fi, same access point):
 | screen 1920x1080 | Wi-Fi | 30.1 | 0.91 | 14.2 ms (67) | 3.8 ms | 5.2 ms |
 
 (10–12 one-second samples each; the screen rows depend on what changed on the Mac at the time.)
+
+## Audio
+
+The Mac's sound plays in the headset (protocol `AUDIO_CONFIG` / `AUDIO`: 48 kHz stereo s16 PCM in
+10 ms chunks stamped with their capture time; the Mac's menu turns it on or off). The headset's
+volume buttons control it like any media.
+
+- **Output**: AAudio, low-latency performance mode, shared, s16 at the stream's rate and channel
+  count (48 kHz stereo), media usage, a device buffer of two bursts. It opens on `AUDIO_CONFIG`
+  (reopened if the format changes) and closes when the connection ends or the app is not visible
+  (headset off, another app in front; it keeps playing behind the Meta menu, like the picture), and
+  every connection starts with an empty buffer. A device change (e.g. Bluetooth headphones)
+  reopens it. If the device refused the source rate the playout resamples linearly (logged as
+  "source rate refused").
+- **Timing** (`audio_playout.{h,cpp}`): every sample is played at its capture time (mapped to the
+  headset clock with the PING clock offset) plus a target delay, so the sound stays in step with
+  the picture. The target is the largest of 40 ms, the video's capture→display delay (its
+  capture→decoded average + 14 ms for the compositor) and the worst arrival delay of the last 4 s
+  + 10 ms, capped at 150 ms. It rises at once when the link gets jittery and comes back down 4 s
+  after.
+- **Clock**: the AAudio callback knows when its frames will be heard (`AAudioStream_getTimestamp`,
+  refreshed every 50 ms from the network thread). If what plays is more than 5 ms off its due
+  time, the playout speeds up or slows down by a tiny resampling ratio (error × 0.25/s, at most 2 %)
+  until it is within 1 ms: clock drift between the Mac and the headset is absorbed without
+  clicks. More than 200 ms off: it fades out and jumps.
+- **Gaps**: a hole in the capture times (the sender drops audio that would be more than 150 ms
+  late, or audio was paused) is filled with silence at its place. If the buffer runs dry first
+  (underrun) it fades out, plays silence and re-starts at the right spot as soon as audio is back.
+  Chunks that arrive after their playout time are counted as late and skipped.
+
+Once per second, while audio is on:
+
+```
+Audio: buffer <ms> (target <ms>), capture->speaker avg <ms> max <ms>, underruns <n>,
+       resyncs <n>, late <n>, dropped <n>, gaps <n> (<ms>), corrections <n> (<+/-ms>),
+       AAudio <rate> Hz <n> ch, device buffer <ms>, device xruns <n>
+```
+
+- *buffer*: received and not yet played. *capture->speaker*: from the Mac's capture of a sample to
+  the moment the speaker plays it (AAudio timestamps + clock offset), per callback.
+- *underruns* / *resyncs*: ran dry / jumped. *late*: chunks that came after their time.
+  *dropped*: duplicates. *gaps*: holes filled with silence. *corrections*: drift corrections
+  started and how much source time they skipped (+) or stretched (−). *device xruns*: AAudio's own
+  underruns (the callback was late), which should stay at 0.
 
 ## Controls
 
@@ -291,15 +335,21 @@ compared with none. Mode 0 submits the quad without any layer-settings struct.
   `passthroughOpacity()` (perceptual SET_DIM mapping).
 - `screen_source.h` — the seam between the XR shell and the content (`ScreenSource`/`ScreenHost`,
   `ScreenCommand`).
-- `mediacodec_source.{h,cpp}` — the `ScreenSource`: glues the network client to the decoder,
-  owns the status text, asks `XrApp` to resize the Surface to the stream size.
+- `mediacodec_source.{h,cpp}` — the `ScreenSource`: glues the network client to the decoder and
+  the audio output, owns the status text, asks `XrApp` to resize the Surface to the stream size.
+- `audio_playout.{h,cpp}` — `AudioPlayout`: lock-free jitter buffer and playout scheduler between
+  the network thread and the AAudio callback (see "Audio"; host-tested with a simulated sender and
+  device).
+- `audio_output.{h,cpp}` — `AudioOutput`: the AAudio stream, its timestamps, device-change
+  reopening.
 - `stream_client.{h,cpp}` — protocol v1 client on its own thread: the USB/Wi-Fi policy above
   (UDP discovery, last host), numeric-IP connects in 50 ms slices so `stop()` is immediate, hello
   check, CONFIG validation (1..8192, even), message parsing (unknown types skipped), PING every
   500 ms (5 fast ones after connect, offset from the lowest-RTT of the last 16), `FRAME_ACK` after
-  every batch of consumed frames, `CONTROL` → `ScreenCommand`, dead-link timeout.
-- `wire.h` — socket-free protocol framing: the `VRSC` magic, hello check, DISCOVER datagram and
-  ANNOUNCE parsing (host-tested).
+  every batch of consumed frames, `CONTROL` → `ScreenCommand`, `AUDIO_CONFIG`/`AUDIO` → audio,
+  dead-link timeout.
+- `wire.h` — socket-free protocol framing: the `VRSC` magic, hello check, DISCOVER datagram,
+  ANNOUNCE and AUDIO_CONFIG parsing (host-tested).
 - `video_decoder.{h,cpp}` — AMediaCodec into the ANativeWindow; `low-latency=1`,
   `vendor.qti-ext-dec-low-latency.enable=1`, `priority=0`; prefers
   `c2.qti.avc.decoder.low_latency` for H.264 and falls back to the default decoder if it rejects

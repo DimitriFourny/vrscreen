@@ -105,7 +105,7 @@ Every message is:
   continuing with the next message. This is how later protocol revisions add messages
   without breaking v1 clients. Both sides follow this rule.
 - Receivers MUST ignore flag bits they do not know, and any payload bytes beyond the
-  fields defined below for PING, PONG and FRAME_ACK.
+  fields defined below for AUDIO_CONFIG, PING, PONG and FRAME_ACK.
 - Receivers may treat `length > 64 MiB` (67 108 864) as a protocol error and close the
   connection. Real messages are far smaller (a 4K keyframe is typically 150-500 KB).
 
@@ -114,6 +114,8 @@ Every message is:
 | `0x01` | CONFIG | server → client |
 | `0x02` | FRAME  | server → client |
 | `0x03` | CONTROL | server → client |
+| `0x04` | AUDIO_CONFIG | server → client |
+| `0x05` | AUDIO  | server → client |
 | `0x10` | PING   | client → server |
 | `0x11` | PONG   | server → client |
 | `0x12` | FRAME_ACK | client → server |
@@ -234,6 +236,66 @@ as soon as the user acts; it is not subject to the frame windows of "Flow contro
   for 1.5 s after the picture goes away (brief reconnects do not flash) and fades over
   0.3 s in both directions.
 
+### `0x04` AUDIO_CONFIG (server → client)
+
+Describes the AUDIO messages that follow. **No AUDIO_CONFIG on a connection means no
+audio** (e.g. the user switched audio off on the Mac, or the sender runs with
+`--no-audio`); clients that do not play audio just skip both types.
+
+| Payload offset | Size | Field      | Notes                                                        |
+|---------------:|-----:|------------|--------------------------------------------------------------|
+| 0              | 1    | format     | `u8`: `1` = PCM, signed 16-bit **little-endian** samples, channels interleaved (L R L R … for stereo) |
+| 1              | 4    | sampleRate | `u32`, Hz (the Mac sender: 48000)                            |
+| 5              | 1    | channels   | `u8` (the Mac sender: 2)                                     |
+
+- When audio is on as a client connects: right after the hello, after the cached CONFIG
+  and the settings CONTROLs, before the first FRAME and the first AUDIO. When audio is
+  switched on later in a connection that has not had one: right before the first AUDIO.
+  Sent again whenever the format changes; AUDIO always uses the format of the most recent
+  AUDIO_CONFIG. Switching audio off sends nothing: AUDIO just stops.
+- A client that does not support `format` (or the rate/channel count) ignores AUDIO until
+  an AUDIO_CONFIG it supports arrives. Unknown `format` values are not a protocol error.
+
+### `0x05` AUDIO (server → client)
+
+One chunk of audio.
+
+| Payload offset | Size | Field             | Notes                                                    |
+|---------------:|-----:|-------------------|----------------------------------------------------------|
+| 0              | 8    | captureTimeMicros | `u64` (big-endian like every header field), sender clock, time of the chunk's **first** sample |
+| 8              | rest | PCM               | `frames × channels × 2` bytes, format from AUDIO_CONFIG   |
+
+- **Endianness:** the header is big-endian, but the PCM samples are **little-endian**
+  signed 16-bit (what Android `AudioTrack`/AAudio, WAV files and most hardware use), so
+  the payload can be handed to the audio output unchanged.
+- **Chunking:** the Mac sender sends 10 ms chunks: 480 frames at 48 kHz, i.e. 1920 PCM
+  bytes (1928-byte payload, 1933 bytes on the wire) for stereo, about 100 messages and
+  1.55 Mbit/s per second. Clients must accept any chunk length that is a whole number of
+  frames (including 0).
+- **Clock:** `captureTimeMicros` is on the same sender clock as FRAME `captureTimeMicros`
+  (see "Clocks"), so audio and video are synchronized by comparing the two: a sample and
+  a picture with the same capture time were captured at the same moment. For screen
+  capture it is ScreenCaptureKit's presentation time of the audio buffer (captured
+  system audio is about 25 ms old when the sender gets it); for the test pattern, the
+  synthesized time.
+- **Continuity:** consecutive chunks normally follow each other exactly (next
+  `captureTimeMicros` = previous + frames × 10^6 / sampleRate, within ±1 µs of
+  rounding; the sender follows the capture clock, so small adjustments of up to a few
+  ms can occur). A larger step forward is a gap: chunks were dropped (see below),
+  capture paused, or audio was switched off and on again. Audio can also simply stop
+  (switched off on the Mac) without any message. Clients play silence in gaps (or let
+  their buffer drain to silence) and re-align on the timestamps; they must not stall.
+- **Not part of flow control:** AUDIO does not count as a FRAME, is never acknowledged
+  and does not take room in the frame windows. It shares the socket with FRAMEs, in
+  capture order.
+- **Drop policy:** audio is only useful when it is fresh. The sender drops queued AUDIO
+  chunks, oldest first, that are more than **150 ms** past their capture time before they
+  could be handed to the socket (e.g. while a slow link drains a large keyframe). Bytes
+  already in the kernel send buffer or in transit cannot be recalled, so clients must
+  still cope with late chunks (drop or skip them by timestamp).
+- Audio never delays video: capture, conversion and sending run independently of the
+  encoder.
+
 ### `0x10` PING (client → server)
 
 | Payload offset | Size | Field            | Notes                       |
@@ -275,8 +337,9 @@ after a CONFIG). It starts at 0 for every connection and wraps around at 2^32.
 `captureTimeMicros` and `serverTimeMicros` are on the **sender clock**: the macOS host
 time clock (`mach_absolute_time`, as used by CoreMedia), in microseconds. It is
 monotonic and unrelated to wall time. For screen capture it is the presentation time
-ScreenCaptureKit assigned to the captured image; for the test pattern, the moment the
-pattern was rendered.
+ScreenCaptureKit assigned to the captured image (FRAME) or audio buffer (AUDIO); for the
+test pattern, the moment the pattern was rendered (FRAME) or the synthesized sample time
+(AUDIO). FRAME and AUDIO timestamps are therefore directly comparable for A/V sync.
 
 The client uses any monotonic clock of its own (Android: `CLOCK_MONOTONIC`) for
 `clientTimeMicros`. To estimate the offset between the two clocks:
@@ -344,6 +407,9 @@ decoder therefore lowers the frame rate instead of growing latency. Two windows 
    desktop bitrates) or in the client's receive buffer (about 0.75 MB on a Quest 3 over
    Wi-Fi) add latency undetected, which is why FRAME_ACK exists.
 
+AUDIO is outside both windows: it is sent as it is captured, and dropped instead of
+delayed when it would be more than 150 ms late (see AUDIO).
+
 Clients should read the socket promptly (e.g. on a dedicated thread) and acknowledge
 frames as they hand them to the decoder.
 
@@ -380,6 +446,15 @@ SET_HAND_GESTURES on:
 03 00 00 00 02 0C 01
 ```
 
+AUDIO_CONFIG s16le, 48000 Hz, stereo, then AUDIO with `captureTimeMicros =
+0x0102030405060708` carrying one stereo frame, left = 1, right = −2 (a real chunk has 480
+frames):
+
+```
+04 00 00 00 06 01 00 00 BB 80 02
+05 00 00 00 0C 01 02 03 04 05 06 07 08 01 00 FE FF
+```
+
 FRAME, keyframe, `captureTimeMicros = 2`, access unit `00 00 00 01 26 01 ...`:
 
 ```
@@ -392,9 +467,11 @@ FRAME, keyframe, `captureTimeMicros = 2`, access unit `00 00 00 01 26 01 ...`:
 server → client  hello  VRSC 0001
 server → client  CONFIG codec=2 3840x2160 (VPS SPS PPS, ~100 B)
 server → client  CONTROL SET_CURVATURE 350, SET_DIM 0, SET_HAND_GESTURES 0 (current settings)
+server → client  AUDIO_CONFIG format=1 48000 Hz 2 ch (if audio is on)
 server → client  FRAME  key=1 (VPS SPS PPS + IDR slices)
 client → server  FRAME_ACK 1
 client → server  PING
+server → client  AUDIO  t=… (10 ms of PCM; ~100 per second, interleaved with FRAMEs)
 server → client  PONG
 server → client  FRAME  key=0 ...
 client → server  FRAME_ACK 2

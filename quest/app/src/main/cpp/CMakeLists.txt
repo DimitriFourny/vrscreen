@@ -14,6 +14,8 @@ target_include_directories(native_app_glue PUBLIC ${ANDROID_NDK}/sources/android
 
 add_library(vrscreen SHARED
     main.cpp
+    audio_output.cpp
+    audio_playout.cpp
     xr_app.cpp
     grab.cpp
     hand_gestures.cpp
@@ -38,4 +40,5 @@ target_link_libraries(vrscreen PRIVATE
     EGL
     GLESv3
     mediandk
+    aaudio
     log)

@@ -25,6 +25,8 @@ message(STATUS "OpenXR headers: ${OPENXR_INCLUDE_DIR}")
 set(SRC ${CMAKE_CURRENT_SOURCE_DIR}/../app/src/main/cpp)
 add_executable(host_tests
     host_tests.cpp
+    audio_tests.cpp
+    ${SRC}/audio_playout.cpp
     ${SRC}/grab.cpp
     ${SRC}/hand_gestures.cpp)
 target_include_directories(host_tests PRIVATE ${SRC})

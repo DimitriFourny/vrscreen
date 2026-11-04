@@ -10,6 +10,8 @@ struct ViewerOptions {
     var snapshotPath: String?
     var exitAfterSnapshot = false
     var durationSeconds: Double?
+    var audioWavPath: String?
+    var avSync = false
 
     static let usage = """
     Usage: vrscreen-viewer [options]
@@ -23,6 +25,10 @@ struct ViewerOptions {
       --snapshot PATH.png      Write the first decoded frame as PNG.
       --exit-after-snapshot    Exit once the snapshot is written.
       --duration S             Exit after S seconds.
+      --audio-wav PATH.wav     Write the received audio to a WAV file (gaps filled with
+                               silence by timestamp, so file time follows capture time).
+      --av-sync                Pair the test source's white flashes with its beeps and
+                               log audio − video (use with vrscreen-sender --source test).
       -h, --help               Show this help.
     """
 
@@ -52,6 +58,8 @@ struct ViewerOptions {
                 let s = try value(arg)
                 guard let d = Double(s), d > 0 else { throw OptionError("--duration: invalid value '\(s)'") }
                 o.durationSeconds = d
+            case "--audio-wav": o.audioWavPath = try value(arg)
+            case "--av-sync": o.avSync = true
             case "-h", "--help":
                 print(usage)
                 exit(0)

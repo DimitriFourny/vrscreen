@@ -1,5 +1,7 @@
 #pragma once
 
+#include "audio_output.h"
+#include "audio_playout.h"
 #include "screen_source.h"
 #include "stream_client.h"
 #include "video_decoder.h"
@@ -11,11 +13,13 @@
 
 namespace qm {
 
-// The real ScreenSource: receives the Mac's stream (StreamClient) and decodes it with
-// MediaCodec straight into the screen quad's Surface (VideoDecoder).
+// The real ScreenSource: receives the Mac's stream (StreamClient), decodes the video with
+// MediaCodec straight into the screen quad's Surface (VideoDecoder) and plays the audio through
+// AAudio (AudioPlayout + AudioOutput).
 //
 // Threads: XR thread (ScreenSource callbacks), network thread (StreamListener callbacks; feeds
-// the decoder without queueing), decoder output thread (inside VideoDecoder).
+// the decoder without queueing, pushes audio, owns the audio stream), decoder output thread
+// (inside VideoDecoder), AAudio callback thread (inside AudioOutput).
 // Lock order: decoderMutex_ before mutex_.
 class MediaCodecSource final : public ScreenSource, private StreamListener {
 public:
@@ -39,6 +43,8 @@ private:
     bool onConfig(const StreamConfig& config) override;
     bool onFrame(const EncodedFrame& frame) override;
     void onControl(const ScreenCommand& command) override;
+    void onAudioConfig(const wire::AudioFormat& format) override;
+    void onAudio(int64_t captureMicros, const uint8_t* pcm, size_t bytes) override;
     void onDisconnected(const std::string& reason) override;
     bool onStatsTick(const LinkStats& stats) override;
 
@@ -65,6 +71,11 @@ private:
 
     std::mutex decoderMutex_;
     VideoDecoder decoder_;
+
+    // Audio (network thread; the playout's consumer side runs on the AAudio callback).
+    AudioPlayout audioPlayout_;
+    AudioOutput audioOutput_{audioPlayout_};
+    wire::AudioFormat audioFormat_;
 
     // Network thread only.
     StreamConfig config_;

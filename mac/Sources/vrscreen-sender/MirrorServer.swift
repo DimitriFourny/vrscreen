@@ -20,11 +20,14 @@ final class ClientSession {
     var needsKeyframe = true
     /// Last CONFIG sent on this connection.
     var sentConfig: ConfigMessage?
+    /// Last AUDIO_CONFIG sent on this connection.
+    var sentAudioConfig: AudioConfigMessage?
     fileprivate(set) var isActive = true
 
     fileprivate let fd: Int32
     fileprivate var reader = MessageReader(expectHello: false)
-    fileprivate var pending: [(data: Data, written: Int, completion: (() -> Void)?)] = []
+    /// `audioMicros` is set for AUDIO messages: their capture time, for the stale-audio drop.
+    fileprivate var pending: [(data: Data, written: Int, completion: (() -> Void)?, audioMicros: UInt64?)] = []
     fileprivate var readSource: DispatchSourceRead?
     fileprivate var writeSource: DispatchSourceWrite?
     fileprivate var writeSourceRunning = false
@@ -50,6 +53,9 @@ final class MirrorServer {
     /// on 5 GHz, 128 KiB caps throughput at ~120 Mbit/s, 512 KiB reaches ~285 Mbit/s
     /// (a 200 KB 4K keyframe goes out in ~6 ms instead of ~13 ms).
     static let ackedSocketSendBuffer: Int32 = 512 * 1024
+    /// AUDIO older than this (capture time → about to be written) is dropped instead of sent:
+    /// a backlog must not delay the headset's audio more than this.
+    static let maxAudioAgeMicros: UInt64 = 150_000
 
     let port: UInt16
     let queue: DispatchQueue
@@ -65,6 +71,14 @@ final class MirrorServer {
     var controlOnConnect: [DebugControlStep] = []
     /// Curvature/dim; sent to every client right after the hello and on every change.
     private(set) var displaySettings = DisplaySettings.defaults
+    /// Format of the AUDIO this sender produces; nil while audio is off. Sent to every client
+    /// right after the hello (after the settings CONTROLs) and before the first AUDIO.
+    var audioConfig: AudioConfigMessage?
+    /// AUDIO chunks queued for a client (some may be dropped later, see `audioChunksDropped`).
+    private(set) var audioChunksQueued = 0
+    /// AUDIO chunks dropped because they were older than `maxAudioAgeMicros` before they
+    /// could be written to the socket.
+    private(set) var audioChunksDropped = 0
     /// Called on `queue` with the active client's address, or nil when none is connected.
     var onActiveClientChanged: ((String?) -> Void)?
 
@@ -129,6 +143,25 @@ final class MirrorServer {
         return true
     }
 
+    /// Sends one AUDIO chunk to the active client (AUDIO_CONFIG first if this connection has
+    /// not had it). Audio is not part of the frame windows; queued chunks that are older than
+    /// `maxAudioAgeMicros` before they can be written are dropped, oldest first.
+    func sendAudio(_ chunk: AudioMessage) {
+        guard let config = audioConfig, let client = activeClient, client.isActive else { return }
+        if client.sentAudioConfig != config {
+            send(.audioConfig(config), to: client)
+            client.sentAudioConfig = config
+        }
+        let now = HostClock.nowMicros()
+        dropStaleAudio(of: client, now: now)
+        if isStale(chunk.captureTimeMicros, now: now) {
+            audioChunksDropped += 1
+            return
+        }
+        audioChunksQueued += 1
+        enqueue(Message.audio(chunk).encoded(), to: client, completion: nil, audioMicros: chunk.captureTimeMicros)
+    }
+
     /// Sends CONTROL to the active client right away (not subject to the frame windows;
     /// it only queues behind data already waiting for this socket). Returns the client's
     /// address, or nil if no client is connected.
@@ -176,6 +209,10 @@ final class MirrorServer {
             }
             // Absolute state the sender owns; clients apply it whenever it arrives.
             for command in displaySettings.commands { send(.control(command), to: client) }
+            if let audioConfig {
+                send(.audioConfig(audioConfig), to: client)
+                client.sentAudioConfig = audioConfig
+            }
             if !controlOnConnect.isEmpty { sendControlOnConnect(to: client) }
             onClientReady?(client)
         }
@@ -262,15 +299,34 @@ final class MirrorServer {
 
     // MARK: Writing
 
-    private func enqueue(_ data: Data, to client: ClientSession, completion: (() -> Void)?) {
+    private func enqueue(_ data: Data, to client: ClientSession, completion: (() -> Void)?, audioMicros: UInt64? = nil) {
         bytesSent += data.count
-        client.pending.append((data, 0, completion))
+        client.pending.append((data, 0, completion, audioMicros))
         flush(client)
+    }
+
+    private func isStale(_ audioMicros: UInt64, now: UInt64) -> Bool {
+        now > audioMicros && now - audioMicros > Self.maxAudioAgeMicros
+    }
+
+    /// Removes queued AUDIO chunks that are too old and not started on the socket yet.
+    private func dropStaleAudio(of client: ClientSession, now: UInt64) {
+        let before = client.pending.count
+        client.pending.removeAll { entry in
+            guard entry.written == 0, let micros = entry.audioMicros else { return false }
+            guard isStale(micros, now: now) else { return false }
+            bytesSent -= entry.data.count
+            return true
+        }
+        audioChunksDropped += before - client.pending.count
     }
 
     /// Writes as much as the socket accepts; the write source resumes the rest.
     private func flush(_ client: ClientSession) {
         guard client.isActive else { return }
+        if client.pending.contains(where: { $0.audioMicros != nil && $0.written == 0 }) {
+            dropStaleAudio(of: client, now: HostClock.nowMicros())
+        }
         while let first = client.pending.first {
             let n = first.data.withUnsafeBytes { raw in
                 Darwin.write(client.fd, raw.baseAddress! + first.written, raw.count - first.written)
@@ -336,7 +392,7 @@ final class MirrorServer {
             onFrameAck?(client)
         case .unknown:
             break // Forward compatibility: skip unknown types.
-        case .config, .frame, .control, .pong:
+        case .config, .frame, .control, .audioConfig, .audio, .pong:
             break // Server-to-client types; ignore if a client echoes them.
         }
     }

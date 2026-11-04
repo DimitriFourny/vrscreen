@@ -32,6 +32,8 @@ namespace {
 constexpr uint8_t kMsgConfig = 0x01;
 constexpr uint8_t kMsgFrame = 0x02;
 constexpr uint8_t kMsgControl = 0x03;
+constexpr uint8_t kMsgAudioConfig = 0x04;
+constexpr uint8_t kMsgAudio = 0x05;
 constexpr uint8_t kMsgPing = 0x10;
 constexpr uint8_t kMsgPong = 0x11;
 constexpr uint8_t kMsgFrameAck = 0x12;
@@ -49,12 +51,8 @@ constexpr int kRoundMillis = 1000;
 constexpr int kAnnounceWaitMillis = 500;
 
 using wire::readU16;
-
-uint32_t readU32(const uint8_t* p) {
-    return (uint32_t{p[0]} << 24) | (uint32_t{p[1]} << 16) | (uint32_t{p[2]} << 8) | uint32_t{p[3]};
-}
-
-uint64_t readU64(const uint8_t* p) { return (uint64_t{readU32(p)} << 32) | readU32(p + 4); }
+using wire::readU32;
+using wire::readU64;
 
 void writeU32(uint8_t* p, uint32_t v) {
     p[0] = static_cast<uint8_t>(v >> 24);
@@ -627,6 +625,23 @@ bool StreamClient::handleMessage(uint8_t type, const uint8_t* payload, uint32_t 
             listener_.onControl(command);
             return true;
         }
+        case kMsgAudioConfig: {
+            wire::AudioFormat format;
+            if (!wire::parseAudioConfig(payload, length, &format)) {
+                *error = "short AUDIO_CONFIG";
+                return false;
+            }
+            LOGI("AUDIO_CONFIG: format %u, %u Hz, %u ch", format.format, format.sampleRate, format.channels);
+            listener_.onAudioConfig(format);
+            return true;
+        }
+        case kMsgAudio:
+            if (length < 8) {
+                *error = "short AUDIO";
+                return false;
+            }
+            listener_.onAudio(static_cast<int64_t>(readU64(payload)), payload + 8, length - 8);
+            return true;
         case kMsgPong:
             onPong(payload, length);
             return true;

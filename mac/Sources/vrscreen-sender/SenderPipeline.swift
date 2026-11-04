@@ -39,6 +39,8 @@ final class SenderPipeline {
     private var totalSkipped = 0
     private var lastStatsTime = Date()
     private var lastBytesSent = 0
+    private var lastAudioSent = 0
+    private var lastAudioDropped = 0
 
     private struct Stats {
         var captured = 0
@@ -148,9 +150,15 @@ final class SenderPipeline {
         } else {
             clientText = "no client"
         }
-        log(String(format: "capture %.1f fps | encoded %.1f fps (%d key) | skipped %d (total %d) | %.2f Mbit/s | %@",
+        let audioSent = server.audioChunksQueued - lastAudioSent
+        let audioDropped = server.audioChunksDropped - lastAudioDropped
+        lastAudioSent = server.audioChunksQueued
+        lastAudioDropped = server.audioChunksDropped
+        let audioText = server.audioConfig == nil ? "audio off"
+            : String(format: "audio %.0f chunks/s, %d dropped", Double(audioSent) / dt, audioDropped)
+        log(String(format: "capture %.1f fps | encoded %.1f fps (%d key) | skipped %d (total %d) | %.2f Mbit/s | %@ | %@",
                    Double(stats.captured) / dt, Double(stats.encoded) / dt, stats.keyframes,
-                   stats.skipped, totalSkipped, Double(bytes) * 8 / dt / 1e6, clientText))
+                   stats.skipped, totalSkipped, Double(bytes) * 8 / dt / 1e6, audioText, clientText))
         stats = Stats()
     }
 }

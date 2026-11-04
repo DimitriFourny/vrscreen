@@ -148,12 +148,14 @@ discovery=1
 hotkeys=1
 mouse=1
 menu=1
+audio=1
 for arg in ${SENDER_ARGS[@]+"${SENDER_ARGS[@]}"}; do
     case "$arg" in
         --no-discovery) discovery=0 ;;
         --no-hotkeys) hotkeys=0 ;;
         --no-mouse) mouse=0 ;;
         --no-menu) menu=0 ;;
+        --no-audio) audio=0 ;;
     esac
 done
 addresses=""
@@ -179,7 +181,10 @@ if (( mouse )); then
     say "Hold ⌃⌥⌘ and move the mouse to orbit it around you; ⌃⌥⌘ + scroll: closer/farther, ⌃⌥⌘⇧ + scroll: bigger/smaller"
 fi
 if (( menu )); then
-    say "Menu-bar icon (goggles): curved screen and dim-surroundings sliders, hand gestures, re-center, reset, travel mode (USB), quit"
+    say "Menu-bar icon (goggles): curved screen and dim-surroundings sliders, hand gestures, audio in headset, mute Mac while mirroring, re-center, reset, travel mode (USB), quit"
+fi
+if (( audio )); then
+    say "The Mac's sound plays in the headset unless switched off in the menu (Audio in headset); --no-audio turns it off"
 fi
 
 # 5. Sender in the foreground. Ctrl-C reaches it directly; it shuts down cleanly and

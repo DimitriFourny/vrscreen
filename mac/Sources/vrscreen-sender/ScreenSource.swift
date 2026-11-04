@@ -4,14 +4,19 @@ import Foundation
 import MirrorProtocol
 import ScreenCaptureKit
 
-/// Captures one display with ScreenCaptureKit as 420v (BT.709 video range).
-/// SCStream only delivers images when the screen changes; idle/blank frames are ignored.
+/// Captures one display with ScreenCaptureKit as 420v (BT.709 video range), and the
+/// system audio (48 kHz stereo, this process excluded) into an `AudioPipeline` while
+/// audio capture is on. SCStream only delivers images when the screen changes;
+/// idle/blank frames are ignored. Audio buffers arrive continuously, silence included.
 final class ScreenSource: NSObject, SCStreamOutput, SCStreamDelegate {
     private let displayIndex: Int?
     private let fps: Int
     private let maxWidth: Int
     private let queue: DispatchQueue
     private let handler: (CVPixelBuffer, UInt64) -> Void
+    private let audio: AudioPipeline?
+    /// Whether the stream captures audio (`setAudioCapture`). On `queue`.
+    private var capturesAudio: Bool
 
     private var stream: SCStream?
     private var display: SCDisplay?
@@ -19,13 +24,16 @@ final class ScreenSource: NSObject, SCStreamOutput, SCStreamDelegate {
     private var stopped = false
 
     /// `handler` is called on `queue` with each captured image and its capture time
-    /// (µs, host clock: the sample's presentation timestamp).
-    init(displayIndex: Int?, fps: Int, maxWidth: Int, queue: DispatchQueue,
-         handler: @escaping (CVPixelBuffer, UInt64) -> Void) {
+    /// (µs, host clock: the sample's presentation timestamp). Audio buffers go to `audio`
+    /// on its own queue while `capturesAudio` is on.
+    init(displayIndex: Int?, fps: Int, maxWidth: Int, queue: DispatchQueue, audio: AudioPipeline?,
+         capturesAudio: Bool, handler: @escaping (CVPixelBuffer, UInt64) -> Void) {
         self.displayIndex = displayIndex
         self.fps = fps
         self.maxWidth = maxWidth
         self.queue = queue
+        self.audio = audio
+        self.capturesAudio = capturesAudio && audio != nil
         self.handler = handler
     }
 
@@ -86,7 +94,10 @@ final class ScreenSource: NSObject, SCStreamOutput, SCStreamDelegate {
         c.colorSpaceName = CGColorSpace.sRGB
         c.showsCursor = true
         c.queueDepth = 6
-        c.capturesAudio = false
+        c.capturesAudio = capturesAudio
+        c.sampleRate = Int(AudioPipeline.config.sampleRate)
+        c.channelCount = Int(AudioPipeline.config.channels)
+        c.excludesCurrentProcessAudio = true
         return c
     }
 
@@ -98,6 +109,7 @@ final class ScreenSource: NSObject, SCStreamOutput, SCStreamDelegate {
                               delegate: self)
         do {
             try stream.addStreamOutput(self, type: .screen, sampleHandlerQueue: queue)
+            if let audio { try stream.addStreamOutput(self, type: .audio, sampleHandlerQueue: audio.queue) }
         } catch {
             return completion(error)
         }
@@ -105,7 +117,8 @@ final class ScreenSource: NSObject, SCStreamOutput, SCStreamDelegate {
         stream.startCapture { [weak self] error in
             self?.queue.async {
                 if error == nil {
-                    log("source: capturing display \(display.displayID) at \(size.width)x\(size.height) @ \(self?.fps ?? 0) fps (420v, BT.709 video range)")
+                    log("source: capturing display \(display.displayID) at \(size.width)x\(size.height) @ \(self?.fps ?? 0) fps (420v, BT.709 video range)"
+                        + ((self?.capturesAudio ?? false) ? " + system audio" : ""))
                 }
                 completion(error)
             }
@@ -124,9 +137,28 @@ final class ScreenSource: NSObject, SCStreamOutput, SCStreamDelegate {
         }
     }
 
+    /// Starts or stops audio capture on the running stream. Call on `queue`.
+    func setAudioCapture(_ on: Bool) {
+        let on = on && audio != nil
+        guard on != capturesAudio else { return }
+        capturesAudio = on
+        guard let stream, !stopped else { return } // applies when the stream (re)starts
+        stream.updateConfiguration(makeConfiguration(width: outputSize.width, height: outputSize.height)) { error in
+            if let error {
+                log("source: switching audio capture \(on ? "on" : "off") failed: \(error)")
+            } else {
+                log("source: system audio capture \(on ? "on" : "off")")
+            }
+        }
+    }
+
     // MARK: SCStreamOutput
 
     func stream(_ stream: SCStream, didOutputSampleBuffer sampleBuffer: CMSampleBuffer, of type: SCStreamOutputType) {
+        if type == .audio {
+            if let audio { audio.handle(sampleBuffer) } // on audio.queue
+            return
+        }
         guard type == .screen, sampleBuffer.isValid else { return }
         guard let attachments = CMSampleBufferGetSampleAttachmentsArray(sampleBuffer, createIfNecessary: false)
                 as? [[SCStreamFrameInfo: Any]],

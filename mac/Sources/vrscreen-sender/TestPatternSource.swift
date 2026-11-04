@@ -6,27 +6,52 @@ import MirrorProtocol
 
 /// Synthetic 420v (BT.709 video range) source: static color bars and grid, plus a
 /// moving box, a sweeping line and a frame counter / timestamp drawn every frame.
+/// Once per second the whole frame flashes white for `flashMicros`; while audio is on, a
+/// 1 kHz beep starts at exactly the capture time of the flash's first frame (otherwise
+/// silence), so A/V sync can be checked end to end.
 final class TestPatternSource {
+    static let flashMicros: UInt64 = 60_000
+    static let beepMicros = 60_000.0
+    static let beepHz = 1000.0
+    /// About −10 dBFS.
+    static let beepAmplitude: Float = 0.3
+    static let audioChunkMicros: UInt64 = 10_000
+
     let width: Int
     let height: Int
     let fps: Int
     private let queue: DispatchQueue
     private let handler: (CVPixelBuffer, UInt64) -> Void
+    /// Interleaved stereo float samples and the capture time of the first one, on `queue`.
+    private let audioHandler: (([Float], UInt64) -> Void)?
     private var pool: CVPixelBufferPool?
     private var timer: DispatchSourceTimer?
+    private var audioTimer: DispatchSourceTimer?
     private var frameNumber = 0
     private let startMicros = HostClock.nowMicros()
     private let lumaTemplate: [UInt8]
     private let chromaTemplate: [UInt8]
     private let font: CTFont
+    /// Whole seconds since start at the last flash.
+    private var lastFlashSecond: UInt64 = 0
+    /// Capture time of the current/last flash's first frame.
+    private var flashOnsetMicros: UInt64?
+    /// Beeps still (partly) to be rendered into audio: their start times.
+    private var beepOnsets: [UInt64] = []
+    private var audioEnabled = false
+    /// Capture time of the next audio sample to produce.
+    private var audioNextMicros: UInt64 = 0
 
-    /// `handler` is called on `queue` with each frame and its capture time (µs, host clock).
-    init(width: Int, height: Int, fps: Int, queue: DispatchQueue, handler: @escaping (CVPixelBuffer, UInt64) -> Void) {
+    /// `handler` is called on `queue` with each frame and its capture time (µs, host clock);
+    /// `audioHandler` likewise with every 10 ms of audio while audio is on.
+    init(width: Int, height: Int, fps: Int, queue: DispatchQueue,
+         audioHandler: (([Float], UInt64) -> Void)?, handler: @escaping (CVPixelBuffer, UInt64) -> Void) {
         self.width = width
         self.height = height
         self.fps = fps
         self.queue = queue
         self.handler = handler
+        self.audioHandler = audioHandler
         (lumaTemplate, chromaTemplate) = Self.makeTemplate(width: width, height: height)
         font = CTFontCreateWithName("Menlo-Bold" as CFString, CGFloat(height) / 12, nil)
     }
@@ -40,7 +65,8 @@ final class TestPatternSource {
         ]
         let status = CVPixelBufferPoolCreate(kCFAllocatorDefault, nil, attributes as CFDictionary, &pool)
         guard status == kCVReturnSuccess else { throw OptionError("CVPixelBufferPoolCreate failed: \(status)") }
-        log("source: test pattern \(width)x\(height) @ \(fps) fps (420v, BT.709 video range)")
+        log("source: test pattern \(width)x\(height) @ \(fps) fps (420v, BT.709 video range), "
+            + "white flash every second\(audioHandler != nil ? " with a 1 kHz beep when audio is on" : "")")
         let timer = DispatchSource.makeTimerSource(flags: .strict, queue: queue)
         timer.schedule(deadline: .now(), repeating: .nanoseconds(1_000_000_000 / fps), leeway: .microseconds(500))
         timer.setEventHandler { [weak self] in self?.produceFrame() }
@@ -51,6 +77,26 @@ final class TestPatternSource {
     func stop() {
         timer?.cancel()
         timer = nil
+        setAudio(false)
+    }
+
+    /// Starts or stops the synthesized audio (silence plus the beeps). Call on `queue`.
+    func setAudio(_ on: Bool) {
+        let on = on && audioHandler != nil
+        guard on != audioEnabled else { return }
+        audioEnabled = on
+        if on {
+            audioNextMicros = HostClock.nowMicros()
+            let timer = DispatchSource.makeTimerSource(flags: .strict, queue: queue)
+            timer.schedule(deadline: .now() + .microseconds(Int(Self.audioChunkMicros)),
+                           repeating: .microseconds(Int(Self.audioChunkMicros)), leeway: .microseconds(500))
+            timer.setEventHandler { [weak self] in self?.produceAudio() }
+            timer.resume()
+            audioTimer = timer
+        } else {
+            audioTimer?.cancel()
+            audioTimer = nil
+        }
     }
 
     private func produceFrame() {
@@ -60,11 +106,62 @@ final class TestPatternSource {
               let buffer else { return }
         let now = HostClock.nowMicros()
         frameNumber += 1
-        render(into: buffer, frame: frameNumber, elapsedMicros: now - startMicros)
+        let second = (now - startMicros) / 1_000_000
+        if second > lastFlashSecond {
+            lastFlashSecond = second
+            flashOnsetMicros = now
+            if audioEnabled { beepOnsets.append(now) }
+        }
+        if let onset = flashOnsetMicros, now - onset < Self.flashMicros {
+            renderFlash(into: buffer)
+        } else {
+            render(into: buffer, frame: frameNumber, elapsedMicros: now - startMicros)
+        }
         CVBufferSetAttachment(buffer, kCVImageBufferYCbCrMatrixKey, kCVImageBufferYCbCrMatrix_ITU_R_709_2, .shouldPropagate)
         CVBufferSetAttachment(buffer, kCVImageBufferColorPrimariesKey, kCVImageBufferColorPrimaries_ITU_R_709_2, .shouldPropagate)
         CVBufferSetAttachment(buffer, kCVImageBufferTransferFunctionKey, kCVImageBufferTransferFunction_ITU_R_709_2, .shouldPropagate)
         handler(buffer, now)
+    }
+
+    /// Audio up to now in 10 ms pieces with contiguous timestamps: silence, plus a beep from
+    /// each flash onset on. A piece is produced once its end has passed, so the flash that
+    /// starts inside it has already been rendered (both run on `queue`).
+    private func produceAudio() {
+        guard audioEnabled, let audioHandler else { return }
+        let now = HostClock.nowMicros()
+        if now > audioNextMicros + 20 * Self.audioChunkMicros {
+            audioNextMicros = now - Self.audioChunkMicros // stalled: skip ahead, leaving a gap
+        }
+        let rate = Double(AudioPipeline.config.sampleRate)
+        let frames = Int(rate) * Int(Self.audioChunkMicros) / 1_000_000
+        while audioNextMicros + Self.audioChunkMicros <= now {
+            let start = audioNextMicros
+            beepOnsets.removeAll { Double($0) + Self.beepMicros < Double(start) }
+            var samples = [Float](repeating: 0, count: frames * 2)
+            for onset in beepOnsets {
+                for i in 0..<frames {
+                    let dt = Double(start) + Double(i) * 1e6 / rate - Double(onset)
+                    guard dt >= 0, dt < Self.beepMicros else { continue }
+                    let v = Self.beepAmplitude * Float(sin(2 * Double.pi * Self.beepHz * dt / 1e6))
+                    samples[2 * i] = v
+                    samples[2 * i + 1] = v
+                }
+            }
+            audioHandler(samples, start)
+            audioNextMicros += Self.audioChunkMicros
+        }
+    }
+
+    /// The whole frame white (Y 235, neutral chroma).
+    private func renderFlash(into buffer: CVPixelBuffer) {
+        CVPixelBufferLockBaseAddress(buffer, [])
+        defer { CVPixelBufferUnlockBaseAddress(buffer, []) }
+        let yBase = CVPixelBufferGetBaseAddressOfPlane(buffer, 0)!
+        let yStride = CVPixelBufferGetBytesPerRowOfPlane(buffer, 0)
+        let uvBase = CVPixelBufferGetBaseAddressOfPlane(buffer, 1)!
+        let uvStride = CVPixelBufferGetBytesPerRowOfPlane(buffer, 1)
+        memset(yBase, 235, yStride * height)
+        memset(uvBase, 128, uvStride * height / 2)
     }
 
     private func render(into buffer: CVPixelBuffer, frame: Int, elapsedMicros: UInt64) {

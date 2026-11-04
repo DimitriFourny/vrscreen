@@ -1,8 +1,9 @@
 import Foundation
 import MirrorProtocol
 
-/// Screen curvature, surroundings dimming and hand gestures, owned by the sender (the
-/// source of truth): sent to every client on connect and on every change, kept across restarts.
+/// The settings the sender owns and keeps across restarts (`settings.json`): curvature,
+/// surroundings dimming and hand gestures (the source of truth for the headset, sent to every
+/// client on connect and on every change), plus the Mac-side audio switches.
 struct DisplaySettings: Codable, Equatable {
     /// Permille, 0 (flat) ... 1000.
     var curvature: UInt16
@@ -10,13 +11,19 @@ struct DisplaySettings: Codable, Equatable {
     var dim: UInt16
     /// Whether the headset reacts to hand input (pinch & hold to move, two hands to resize).
     var handGestures: Bool
+    /// "Audio in headset": capture the Mac's system audio and send it to the headset.
+    var audio: Bool
+    /// "Mute Mac while mirroring": mute the Mac's output while audio goes to a headset.
+    var muteMac: Bool
 
-    static let defaults = DisplaySettings(curvature: 0, dim: 0, handGestures: false)
+    static let defaults = DisplaySettings(curvature: 0, dim: 0)
 
-    init(curvature: UInt16, dim: UInt16, handGestures: Bool = false) {
+    init(curvature: UInt16, dim: UInt16, handGestures: Bool = false, audio: Bool = true, muteMac: Bool = false) {
         self.curvature = min(curvature, ControlCommand.permilleMax)
         self.dim = min(dim, ControlCommand.permilleMax)
         self.handGestures = handGestures
+        self.audio = audio
+        self.muteMac = muteMac
     }
 
     /// Out-of-range values in a hand-edited file are clamped, not rejected; missing keys
@@ -25,7 +32,9 @@ struct DisplaySettings: Codable, Equatable {
         let c = try decoder.container(keyedBy: CodingKeys.self)
         self.init(curvature: try c.decodeIfPresent(UInt16.self, forKey: .curvature) ?? 0,
                   dim: try c.decodeIfPresent(UInt16.self, forKey: .dim) ?? 0,
-                  handGestures: try c.decodeIfPresent(Bool.self, forKey: .handGestures) ?? false)
+                  handGestures: try c.decodeIfPresent(Bool.self, forKey: .handGestures) ?? false,
+                  audio: try c.decodeIfPresent(Bool.self, forKey: .audio) ?? true,
+                  muteMac: try c.decodeIfPresent(Bool.self, forKey: .muteMac) ?? false)
     }
 
     /// CONTROL messages that put a client in this state.

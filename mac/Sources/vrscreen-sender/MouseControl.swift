@@ -108,22 +108,19 @@ private func restoreCursorAssociation() {
     }
 }
 
-private func fatalSignalHandler(_ signalNumber: Int32) {
-    restoreCursorAssociation()
-    signal(signalNumber, SIG_DFL)
-    raise(signalNumber)
-}
-
 /// Freezes the Mac cursor while orbiting (the mouse keeps producing deltas), using
 /// `CGAssociateMouseAndMouseCursorPosition`. `freeze()` on the main thread only;
 /// `release()` from any thread (shutdown calls it from the signal queue).
 enum CursorFreeze {
-    private static var safetyNetsInstalled = false
     private static var unavailable = false
+    private static var safetyNetRegistered = false
 
     static func freeze() {
         guard cursorFreezeActive == 0, !unavailable else { return }
-        installSafetyNets()
+        if !safetyNetRegistered {
+            safetyNetRegistered = true
+            ExitSafetyNet.register(restoreCursorAssociation)
+        }
         let error = CGAssociateMouseAndMouseCursorPosition(0)
         if error == .success {
             cursorFreezeActive = 1
@@ -135,17 +132,6 @@ enum CursorFreeze {
 
     static func release() {
         restoreCursorAssociation()
-    }
-
-    /// atexit covers exit() (Ctrl-C, SIGTERM, SIGHUP shut down through exit); the
-    /// handlers cover crashes. SIGKILL cannot be caught.
-    private static func installSafetyNets() {
-        guard !safetyNetsInstalled else { return }
-        safetyNetsInstalled = true
-        atexit { restoreCursorAssociation() }
-        for signalNumber in [SIGSEGV, SIGBUS, SIGILL, SIGABRT, SIGFPE, SIGTRAP] {
-            signal(signalNumber, fatalSignalHandler)
-        }
     }
 }
 

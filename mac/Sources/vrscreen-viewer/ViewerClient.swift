@@ -42,7 +42,7 @@ final class ViewerClient {
     private(set) var port: UInt16
     let queue: DispatchQueue
     private let discoverer: Discoverer?
-    /// CONFIG / FRAME messages, in stream order.
+    /// CONFIG / FRAME / CONTROL / AUDIO_CONFIG / AUDIO messages, in stream order.
     var onMessage: ((Message) -> Void)?
     var onDisconnected: (() -> Void)?
 
@@ -158,7 +158,7 @@ final class ViewerClient {
         case .pong(let clientTime, let serverTime):
             clock.addPong(clientSendMicros: clientTime, serverMicros: serverTime,
                           clientReceiveMicros: HostClock.nowMicros())
-        case .config, .frame, .control:
+        case .config, .frame, .control, .audioConfig, .audio:
             onMessage?(message)
         case .ping, .frameAck:
             break // Client-to-server types.

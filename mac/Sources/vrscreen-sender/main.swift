@@ -25,9 +25,37 @@ let settingsStore = DisplaySettingsStore.standard
 let initialDisplaySettings = settingsStore.load()
 server.updateDisplaySettings(initialDisplaySettings)
 let deliver: (CVPixelBuffer, UInt64) -> Void = { buffer, micros in pipeline.handleCapture(buffer, captureMicros: micros) }
+// Audio: nil with --no-audio. The menu's "Audio in headset" switches capture on and off.
+let audioPipeline = options.audio ? AudioPipeline(server: server, serverQueue: queue) : nil
+let macMute = MacOutputMute(queue: queue)
+/// Latest settings (from the file, then the menu). On `queue`.
+var currentSettings = initialDisplaySettings
+/// Menu status-line updates; set once the menu exists. On `queue`.
+var onClientChangedForMenu: ((String?) -> Void)?
 
 var testSource: TestPatternSource?
 var screenSource: ScreenSource?
+
+var audioWanted: Bool { audioPipeline != nil && currentSettings.audio }
+
+/// Applies the audio settings: capture on/off, AUDIO_CONFIG for clients, and the Mac mute,
+/// which is engaged only while audio actually goes to a connected client. On `queue`.
+func applyAudioSettings() {
+    let on = audioWanted
+    if on != (server.audioConfig != nil) {
+        server.audioConfig = on ? AudioPipeline.config : nil
+        if !on { audioPipeline?.reset() }
+        log("audio: \(on ? "on (48 kHz stereo s16le, 10 ms chunks to the headset)" : "off")")
+    }
+    testSource?.setAudio(on)
+    screenSource?.setAudioCapture(on)
+    macMute.set(on && currentSettings.muteMac && server.activeClient != nil)
+}
+
+server.onActiveClientChanged = { address in
+    applyAudioSettings()
+    onClientChangedForMenu?(address)
+}
 
 queue.async {
     do {
@@ -35,13 +63,18 @@ queue.async {
         try discovery?.start()
         switch options.source {
         case .test:
-            let source = TestPatternSource(width: options.width, height: options.height, fps: options.fps,
-                                           queue: queue, handler: deliver)
+            let source = TestPatternSource(
+                width: options.width, height: options.height, fps: options.fps, queue: queue,
+                audioHandler: audioPipeline.map { audio in
+                    { samples, micros in audio.queue.async { audio.handle(interleaved: samples, captureMicros: micros) } }
+                },
+                handler: deliver)
             try source.start()
             testSource = source
         case .screen:
             let source = ScreenSource(displayIndex: options.displayIndex, fps: options.fps,
-                                      maxWidth: options.maxWidth, queue: queue, handler: deliver)
+                                      maxWidth: options.maxWidth, queue: queue, audio: audioPipeline,
+                                      capturesAudio: audioWanted, handler: deliver)
             screenSource = source
             source.start { error in
                 guard let error else { return }
@@ -50,6 +83,8 @@ queue.async {
                 exit(1)
             }
         }
+        applyAudioSettings()
+        if audioPipeline == nil { log("audio: off (--no-audio)") }
     } catch {
         log("startup failed: \(error)")
         exit(1)
@@ -70,6 +105,7 @@ statsTimer.resume()
 func shutdown() {
     log("shutting down")
     CursorFreeze.release()
+    macMute.set(false)
     statsTimer.cancel()
     testSource?.stop()
     server.stop()
@@ -118,7 +154,14 @@ if options.hotkeys || options.mouse || options.menu {
         }
         let menu = StatusMenu(
             store: settingsStore, settings: initialDisplaySettings, travelModeSource: travelModeSource,
-            onSettingsChange: { settings in queue.async { server.updateDisplaySettings(settings) } },
+            audioAvailable: audioPipeline != nil,
+            onSettingsChange: { settings in
+                queue.async {
+                    server.updateDisplaySettings(settings)
+                    currentSettings = settings
+                    applyAudioSettings()
+                }
+            },
             onCommand: { command in
                 queue.async {
                     if let address = server.sendControl(command) {
@@ -132,7 +175,7 @@ if options.hotkeys || options.mouse || options.menu {
         menu.install()
         queue.async {
             // Server state lives on `queue`; also show a client that connected before this ran.
-            server.onActiveClientChanged = { address in DispatchQueue.main.async { menu.setClient(address: address) } }
+            onClientChangedForMenu = { address in DispatchQueue.main.async { menu.setClient(address: address) } }
             let current = server.activeClient?.address
             DispatchQueue.main.async { menu.setClient(address: current) }
         }

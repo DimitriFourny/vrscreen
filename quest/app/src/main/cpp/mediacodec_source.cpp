@@ -12,6 +12,9 @@ namespace {
 
 constexpr int64_t kQueueStallMicros = 1'000'000;
 constexpr auto kSurfaceResizeTimeout = std::chrono::seconds(3);
+// Decoded picture -> on the display: up to one compositor frame (72 Hz) after the decoder hands it
+// over. Added to the video's capture->decoded latency for the audio's minimum delay.
+constexpr int64_t kDisplayMicros = 14'000;
 
 // The status panel fits about 50 characters per line. Cuts on a UTF-8 character boundary.
 std::string clip(const std::string& s, size_t max) {
@@ -211,11 +214,39 @@ void MediaCodecSource::onControl(const ScreenCommand& command) {
     if (host_ != nullptr) host_->screenCommand(command);
 }
 
+void MediaCodecSource::onAudioConfig(const wire::AudioFormat& format) {
+    if (audioOutput_.isOpen() && format.format == audioFormat_.format && format.sampleRate == audioFormat_.sampleRate &&
+        format.channels == audioFormat_.channels) {
+        return;  // same format: keep playing
+    }
+    audioOutput_.close();
+    audioFormat_ = format;
+    if (!wire::playable(format)) {
+        LOGW("Audio: format %u, %u Hz, %u ch not supported (s16le, mono or stereo); no audio", format.format,
+             format.sampleRate, format.channels);
+        return;
+    }
+    audioOutput_.open(static_cast<int>(format.sampleRate), format.channels);
+}
+
+void MediaCodecSource::onAudio(int64_t captureMicros, const uint8_t* pcm, size_t bytes) {
+    const int64_t now = StreamClient::nowMicros();
+    audioOutput_.service(now);  // timestamps, device-change reopen, retry of a failed open
+    if (!audioOutput_.isOpen()) return;  // no (playable) AUDIO_CONFIG, or no device right now
+    int64_t offset = 0;
+    if (client_.clockOffset(&offset)) audioPlayout_.setClockOffset(offset);
+    const size_t frameBytes = size_t{2} * audioFormat_.channels;
+    audioPlayout_.push(captureMicros, pcm, static_cast<int>(bytes / frameBytes), now);
+}
+
 void MediaCodecSource::onDisconnected(const std::string& reason) {
     (void)reason;
     connected_ = false;
     stopDecoder();
     config_ = StreamConfig{};
+    // No audio without a connection; the next one starts afresh (flushed) with its AUDIO_CONFIG.
+    audioOutput_.close();
+    audioFormat_ = wire::AudioFormat{};
 }
 
 bool MediaCodecSource::onStatsTick(const LinkStats& stats) {
@@ -228,6 +259,8 @@ bool MediaCodecSource::onStatsTick(const LinkStats& stats) {
                             static_cast<double>(offset)) / 1000.0;
         const double max = static_cast<double>(d.latencyMaxMicros + offset) / 1000.0;
         std::snprintf(latency, sizeof(latency), "avg %.1f ms max %.1f ms", avg, max);
+        // Audio plays no earlier than the picture it belongs to.
+        audioPlayout_.setVideoDelay(static_cast<int64_t>(avg * 1000.0) + kDisplayMicros);
     }
     char decode[64] = "n/a";
     if (d.decodeSamples > 0) {
@@ -244,6 +277,22 @@ bool MediaCodecSource::onStatsTick(const LinkStats& stats) {
          stats.rttMicros >= 0 ? static_cast<double>(stats.rttMicros) / 1000.0 : -1.0,
          queued > rendered ? queued - rendered : 0, decoder_.running() ? decoder_.name().c_str() : "no decoder",
          config_.width, config_.height, transport_.c_str());
+    if (audioOutput_.isOpen()) {
+        audioOutput_.service(StreamClient::nowMicros());
+        const AudioPlayoutStats a = audioPlayout_.takeStats();
+        char speaker[64] = "n/a";
+        if (a.latencySamples > 0) {
+            std::snprintf(speaker, sizeof(speaker), "avg %.1f ms max %.1f ms",
+                          static_cast<double>(a.latencySumMicros) / static_cast<double>(a.latencySamples) / 1000.0,
+                          static_cast<double>(a.latencyMaxMicros) / 1000.0);
+        }
+        LOGI("Audio: buffer %.1f ms (target %.1f ms), capture->speaker %s, underruns %" PRIu64 ", resyncs %" PRIu64
+             ", late %" PRIu64 ", dropped %" PRIu64 ", gaps %" PRIu64 " (%.1f ms), corrections %" PRIu64
+             " (%+.2f ms), %s",
+             static_cast<double>(a.bufferedMicros) / 1000.0, static_cast<double>(a.targetDelayMicros) / 1000.0, speaker,
+             a.underruns, a.resyncs, a.lateChunks, a.droppedChunks, a.gaps, static_cast<double>(a.gapMicros) / 1000.0,
+             a.corrections, static_cast<double>(a.correctedMicros) / 1000.0, audioOutput_.describe().c_str());
+    }
     // A codec that died while the screen is static would otherwise go unnoticed until the next frame.
     return !decoder_.failed();
 }

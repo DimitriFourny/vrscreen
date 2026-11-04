@@ -36,6 +36,8 @@ public enum MessageType: UInt8, Sendable {
     case config = 0x01
     case frame = 0x02
     case control = 0x03
+    case audioConfig = 0x04
+    case audio = 0x05
     case ping = 0x10
     case pong = 0x11
     case frameAck = 0x12
@@ -79,6 +81,10 @@ public enum Message: Equatable, Sendable {
     case frame(FrameMessage)
     /// Server → client: screen placement command.
     case control(ControlCommand)
+    /// Server → client: format of the following AUDIO messages.
+    case audioConfig(AudioConfigMessage)
+    /// Server → client: one chunk of PCM audio.
+    case audio(AudioMessage)
     /// Client → server.
     case ping(clientTimeMicros: UInt64)
     /// Server → client; `serverTimeMicros` is on the same clock as `captureTimeMicros`.
@@ -120,6 +126,16 @@ public enum Message: Equatable, Sendable {
         case .control(let command):
             type = MessageType.control.rawValue
             payload = command.encoded()
+        case .audioConfig(let c):
+            type = MessageType.audioConfig.rawValue
+            payload.append(c.format)
+            payload.appendBigEndian(c.sampleRate)
+            payload.append(c.channels)
+        case .audio(let a):
+            type = MessageType.audio.rawValue
+            payload.reserveCapacity(8 + a.pcm.count)
+            payload.appendBigEndian(a.captureTimeMicros)
+            payload.append(a.pcm)
         case .unknown(let t, let p):
             type = t
             payload = p
@@ -156,6 +172,14 @@ public enum Message: Equatable, Sendable {
                 accessUnit: r.rest()))
         case .control:
             return .control(try ControlCommand.decode(payload))
+        case .audioConfig:
+            guard let format = r.u8(), let rate = r.u32(), let channels = r.u8() else {
+                throw .malformed(type: type, reason: "AUDIO_CONFIG payload shorter than 6 bytes")
+            }
+            return .audioConfig(AudioConfigMessage(format: format, sampleRate: rate, channels: channels))
+        case .audio:
+            guard let time = r.u64() else { throw .malformed(type: type, reason: "AUDIO payload shorter than 8 bytes") }
+            return .audio(AudioMessage(captureTimeMicros: time, pcm: r.rest()))
         case .ping:
             guard let t = r.u64() else { throw .malformed(type: type, reason: "PING payload shorter than 8 bytes") }
             return .ping(clientTimeMicros: t)

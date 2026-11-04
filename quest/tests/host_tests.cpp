@@ -1,54 +1,21 @@
 // Host unit tests: hand-gesture state machine, pose filter, facing()/headingOf() near the zenith,
-// highlight geometry, protocol hello/discovery framing. No framework: each TEST registers a
-// function; CHECK records failures.
+// highlight geometry, protocol hello/discovery framing (the audio playout is in audio_tests.cpp).
 
 #include "grab.h"
 #include "hand_gestures.h"
+#include "test_support.h"
 #include "wire.h"
 #include "xr_math.h"
 
 #include <cmath>
 #include <cstdio>
-#include <functional>
+#include <cstring>
 #include <string>
 #include <vector>
 
 using namespace qm;
 
 namespace {
-
-struct TestCase {
-    const char* name;
-    std::function<void()> fn;
-};
-std::vector<TestCase>& registry() {
-    static std::vector<TestCase> tests;
-    return tests;
-}
-int g_failures = 0;
-struct Register {
-    Register(const char* name, std::function<void()> fn) { registry().push_back({name, std::move(fn)}); }
-};
-#define TEST(name)                                  \
-    void name();                                    \
-    const Register register_##name(#name, name);    \
-    void name()
-#define CHECK(cond)                                                             \
-    do {                                                                        \
-        if (!(cond)) {                                                          \
-            std::printf("  FAILED %s:%d: %s\n", __FILE__, __LINE__, #cond);     \
-            ++g_failures;                                                       \
-        }                                                                       \
-    } while (0)
-#define CHECK_NEAR(a, b, tol)                                                                          \
-    do {                                                                                               \
-        const double va = (a), vb = (b);                                                               \
-        if (!(std::fabs(va - vb) <= (tol))) {                                                          \
-            std::printf("  FAILED %s:%d: %s = %.5f, expected %.5f (+-%g)\n", __FILE__, __LINE__, #a, va, vb, \
-                        static_cast<double>(tol));                                                     \
-            ++g_failures;                                                                              \
-        }                                                                                              \
-    } while (0)
 
 constexpr double kDt = 1.0 / 72.0;
 constexpr float kPi = 3.14159265f;
@@ -630,14 +597,28 @@ TEST(announceParsing) {
     CHECK(!wire::parseAnnounce(datagram, 9, &a));
 }
 
+TEST(audioConfigParsing) {
+    const uint8_t payload[6] = {0x01, 0x00, 0x00, 0xBB, 0x80, 0x02};  // PCM s16le, 48000 Hz, 2 ch
+    wire::AudioFormat f;
+    CHECK(wire::parseAudioConfig(payload, sizeof(payload), &f));
+    CHECK(f.format == 1 && f.sampleRate == 48000 && f.channels == 2);
+    CHECK(wire::playable(f));
+    CHECK(!wire::parseAudioConfig(payload, 5, &f));
+    f.channels = 6;
+    CHECK(!wire::playable(f));
+    f.channels = 2;
+    f.format = 2;
+    CHECK(!wire::playable(f));
+}
+
 }  // namespace
 
 int main() {
-    for (const TestCase& t : registry()) {
-        const int before = g_failures;
+    for (const testing::TestCase& t : testing::registry()) {
+        const int before = testing::failures();
         t.fn();
-        std::printf("%s %s\n", g_failures == before ? "ok  " : "FAIL", t.name);
+        std::printf("%s %s\n", testing::failures() == before ? "ok  " : "FAIL", t.name);
     }
-    std::printf("%zu tests, %d failed checks\n", registry().size(), g_failures);
-    return g_failures == 0 ? 0 : 1;
+    std::printf("%zu tests, %d failed checks\n", testing::registry().size(), testing::failures());
+    return testing::failures() == 0 ? 0 : 1;
 }

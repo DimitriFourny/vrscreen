@@ -10,6 +10,8 @@ Over a USB cable or Wi-Fi, with about 25 ms from capture to decoded frame at 4K.
 - **USB or Wi-Fi**, chosen automatically: the headset tries the cable first and otherwise finds
   the Mac on the local network. Pulling the cable mid-session falls over to Wi-Fi.
 - **Flat or curved screen**, and **dimmable surroundings**, from a Mac menu-bar icon.
+- **The Mac's sound in the headset**, in sync with the picture (on by default; optionally
+  mutes the Mac's speakers while mirroring).
 - **Place the screen without leaving the keyboard**: ⌃⌥⌘ + arrows / mouse / scroll. Or grab it with
   a controller grip, or with your hands (pinch and hold, two hands to resize).
 - **Travel mode helper**: the menu shows the headset's travel-mode state and opens Quick Settings
@@ -22,7 +24,8 @@ View-only: you keep using your real keyboard and mouse, which you see through pa
 ```mermaid
 flowchart LR
   subgraph Mac["Mac: vrscreen-sender (Swift)"]
-    A[ScreenCaptureKit] --> B[VideoToolbox HEVC<br/>low-latency]
+    A[ScreenCaptureKit<br/>screen + system audio] --> B[VideoToolbox HEVC<br/>low-latency]
+    A -- "PCM, 10 ms chunks" --> C
     B --> C[TCP server :7777<br/>UDP discovery :7778]
     M[Menu-bar icon<br/>⌃⌥⌘ shortcuts] --> C
   end
@@ -31,12 +34,15 @@ flowchart LR
     D[Stream client] --> E[MediaCodec<br/>hardware decoder]
     E --> F[Android surface swapchain]
     F --> G[Quad or cylinder layer<br/>over passthrough]
+    D --> H[Audio output<br/>synced to the picture]
   end
 ```
 
 The headset acknowledges every frame it hands to its decoder, and the Mac keeps at most three
-frames in flight, so a slow link drops intermediate frames instead of building up delay. The full
-wire protocol is in [`docs/protocol.md`](docs/protocol.md).
+frames in flight, so a slow link drops intermediate frames instead of building up delay. Sound
+travels on the same connection as uncompressed 48 kHz stereo in 10 ms chunks, stamped with the
+same capture clock as the frames; it never waits for the video window, and chunks more than
+150 ms late are dropped. The full wire protocol is in [`docs/protocol.md`](docs/protocol.md).
 
 ## Requirements
 
@@ -106,9 +112,10 @@ Without the Accessibility permission, the scroll also reaches the app under the 
 the sender swallows the mouse and scroll events while ⌃⌥⌘ is held.
 
 **Menu-bar icon:** connection status, *Curved screen* and *Dim surroundings* sliders, *Hand
-gestures* checkbox, Re-center, Reset placement, travel-mode status and *Open Quick Settings in
-headset* (USB only), Quit. These settings live on the Mac and are sent to the headset on every
-connection.
+gestures* checkbox, *Audio in headset* (on by default) and *Mute Mac while mirroring* (off by
+default) checkboxes, Re-center, Reset placement, travel-mode status and *Open Quick Settings in
+headset* (USB only), Quit. These settings live on the Mac; the screen settings are sent to the
+headset on every connection.
 
 **Headset:**
 
@@ -168,12 +175,13 @@ cd quest && cmake -S tests -B build/host-tests && cmake --build build/host-tests
     && ctest --test-dir build/host-tests --output-on-failure   # headset logic on the Mac
 ```
 
-`vrscreen-sender --source test` streams a synthetic pattern (no Screen Recording permission), and
-`vrscreen-viewer` decodes the stream on the Mac, handy for working without a headset.
+`vrscreen-sender --source test` streams a synthetic pattern (no Screen Recording permission) that
+flashes white with a 1 kHz beep once per second, and `vrscreen-viewer` decodes the stream on the
+Mac (`--audio-wav`, `--av-sync` to check the sound), handy for working without a headset.
 
 ## Limitations and roadmap
 
-- No audio in the headset yet (planned).
+- Audio goes one way (Mac → headset); no microphone.
 - Mirrors one existing display; no extra virtual display.
 - macOS sender only for now; the protocol is OS-independent.
 - View-only by design: input stays on your real keyboard and mouse.

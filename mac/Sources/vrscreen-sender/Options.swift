@@ -20,6 +20,8 @@ struct SenderOptions {
     var hotkeys = true
     var mouse = true
     var menu = true
+    /// False with --no-audio: never capture or send audio, whatever the menu setting.
+    var audio = true
     /// Headset on USB for the menu's travel-mode items (scripts/mirror.sh passes it).
     var adbSerial: String?
     /// Degrees of ORBIT per point of mouse movement.
@@ -33,7 +35,9 @@ struct SenderOptions {
     Usage: vrscreen-sender [options]
 
       --source screen|test     Frame source (default screen). "test" is a synthetic
-                               pattern that needs no Screen Recording permission.
+                               pattern that needs no Screen Recording permission; it
+                               flashes white once per second, with a 1 kHz beep in
+                               the audio at the flash.
       --display N              Display index from the list printed at startup
                                (default: the main display).
       --port N                 TCP listen port (default 7777).
@@ -49,7 +53,9 @@ struct SenderOptions {
       --width N --height N     Test source size (default 1920x1080).
       --no-hotkeys             Do not register the global ⌃⌥⌘ screen-placement shortcuts.
       --no-mouse               Do not use ⌃⌥⌘ + mouse (orbit) and ⌃⌥⌘ + scroll (zoom).
-      --no-menu                No menu-bar icon (curvature, dimming, re-center, quit).
+      --no-menu                No menu-bar icon (curvature, dimming, audio, re-center, quit).
+      --no-audio               Never capture or send audio (overrides the menu's
+                               "Audio in headset").
       --adb-serial S           Headset on USB (adb serial) for the menu's travel-mode
                                items; without it they show "headset not on USB".
       --mouse-sensitivity DEG  Orbit degrees per point of mouse movement (default 0.1).
@@ -111,6 +117,7 @@ struct SenderOptions {
             case "--no-hotkeys": o.hotkeys = false
             case "--no-mouse": o.mouse = false
             case "--no-menu": o.menu = false
+            case "--no-audio": o.audio = false
             case "--adb-serial": o.adbSerial = try value(arg)
             case "--mouse-sensitivity": o.mouseDegreesPerPoint = try double(arg)
             case "--scroll-sensitivity": o.scrollSensitivity = try double(arg)

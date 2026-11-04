@@ -3,10 +3,11 @@
 VRScreen — Mac screen mirroring for Meta Quest. This package is the Mac side: it
 mirrors the Mac's display to a Quest 3 (view-only) and contains:
 
-- `vrscreen-sender`: captures a display with ScreenCaptureKit, encodes it with
-  VideoToolbox (HEVC or H.264, hardware, low latency) and serves it over TCP.
+- `vrscreen-sender`: captures a display and the system audio with ScreenCaptureKit,
+  encodes the picture with VideoToolbox (HEVC or H.264, hardware, low latency) and
+  serves both over TCP.
 - `vrscreen-viewer`: a Mac test client (window or headless) that speaks the same
-  protocol as the Quest app.
+  protocol as the Quest app, and can write the received audio to a WAV file.
 - `MirrorProtocol`: the shared protocol library (framing, message types,
   Annex-B/AVCC and parameter-set helpers).
 
@@ -45,6 +46,10 @@ in that setup (and only then).
 
 # Viewer headless: stats only, one PNG snapshot, then exit
 .build/release/vrscreen-viewer --headless --snapshot /tmp/mirror.png --exit-after-snapshot
+
+# A/V check: test pattern (white flash + 1 kHz beep every second) → WAV + sync report
+.build/release/vrscreen-sender --source test
+.build/release/vrscreen-viewer --headless --audio-wav /tmp/mirror.wav --av-sync --duration 10
 ```
 
 Stop either with Ctrl-C.
@@ -53,7 +58,7 @@ Stop either with Ctrl-C.
 
 | Option                     | Default | Meaning                                                      |
 |----------------------------|---------|--------------------------------------------------------------|
-| `--source screen\|test`    | screen  | ScreenCaptureKit capture, or the synthetic test pattern       |
+| `--source screen\|test`    | screen  | ScreenCaptureKit capture, or the synthetic test pattern (flashes white once per second, with a 1 kHz beep at the flash while audio is on) |
 | `--display N`              | main    | Display index, from the list printed at startup              |
 | `--port N`                 | 7777    | TCP listen port (all interfaces)                             |
 | `--discovery-port N`       | 7778    | UDP port answering LAN discovery (DISCOVER → ANNOUNCE)       |
@@ -68,14 +73,16 @@ Stop either with Ctrl-C.
 | `--no-hotkeys`             | off     | Do not register the global screen-placement shortcuts        |
 | `--no-mouse`               | off     | Do not use ⌃⌥⌘ + mouse (orbit) / scroll (zoom)               |
 | `--no-menu`                | off     | No menu-bar icon                                             |
+| `--no-audio`               | off     | Never capture or send audio, whatever the menu says          |
 | `--adb-serial S`           | none    | Headset on USB for the menu's travel-mode items (`scripts/mirror.sh` passes it) |
 | `--mouse-sensitivity DEG`  | 0.1     | Orbit degrees per point of mouse movement                    |
 | `--scroll-sensitivity X`   | 1       | Scroll zoom multiplier (a wheel notch is a quarter step)     |
 | `--debug-control-on-connect SPEC` | none | Testing: CONTROL commands sent to each client on connect, paced at 60 Hz; `wait:MS` pauses; e.g. `"translate:1,0;orbit:50,0*50;curvature:500;wait:3000;dim:1000"` |
 
 Once per second it logs capture fps, encoded fps (and keyframes), captures skipped by
-backpressure, the bitrate actually sent, and the client with its unsent backlog and,
-for clients that send FRAME_ACK, frames in flight (current/limit and the per-second max).
+backpressure, the bitrate actually sent, audio chunks queued per second and dropped as
+too late (or `audio off`), and the client with its unsent backlog and, for clients that
+send FRAME_ACK, frames in flight (current/limit and the per-second max).
 
 ### Viewer options
 
@@ -89,13 +96,25 @@ for clients that send FRAME_ACK, frames in flight (current/limit and the per-sec
 | `--snapshot PATH.png`   | none      | Write the first decoded frame as PNG     |
 | `--exit-after-snapshot` | off       | Exit once the snapshot is written        |
 | `--duration S`          | none      | Exit after S seconds                     |
+| `--audio-wav PATH.wav`  | none      | Write the received audio to a WAV file   |
+| `--av-sync`             | off       | With `--source test`: pair each white flash with its beep and log audio − video |
 
 Once per second it logs received and decoded fps, bitrate, capture→decoded latency
 (avg/max, measured through the PING/PONG clock offset the way the Quest client does
-it), the last PING round trip, and the stream format. It acknowledges every FRAME
+it), the last PING round trip, the stream format and, once audio arrives, audio chunks
+per second, PCM kbit/s and gaps (a chunk starting more than 1 ms after the previous one
+ended; total gap time in brackets). It acknowledges every FRAME
 (FRAME_ACK) as it hands it to the decoder, and reconnects every second while the
 sender is unreachable or after the sender restarts. CONTROL messages are printed
 (`control: TRANSLATE dx=+1 dy=0`, `control: ORBIT yaw=+0.50° pitch=+0.00°`).
+
+`--audio-wav` writes 16-bit PCM in the stream's format and fills gaps with silence
+according to the timestamps (up to 10 s per gap), so a position in the file maps to
+capture time: the log gives the capture time of the first sample. The header is
+updated every second and on exit (`--duration`, Ctrl-C, SIGTERM). `--av-sync` detects
+the test pattern's flash in the decoded frames (mean brightness above 200/255) and the
+beep onset in the audio (first sample above 1000/32767 after 100 ms of quiet), and logs
+`av-sync: … audio − video = +0.028 ms` per pair and a summary on exit.
 
 ## Menu-bar icon
 
@@ -110,10 +129,13 @@ follows light/dark mode; "QM" if the symbol is missing). Its menu has:
   black; the screen itself is never dimmed;
 - **Hand gestures** (checkbox, default off): lets you pinch & hold to move the screen
   and use two hands to resize it; while off, the headset ignores hand input entirely;
+- **Audio in headset** (checkbox, default on) and **Mute Mac while mirroring**
+  (checkbox, default off), see [Audio](#audio);
 - **Re-center** and **Reset placement** (like ⌃⌥⌘R / ⌃⌥⌘0);
 - **Travel mode: On / Off** and **Open Quick Settings in headset…** (USB only, see below);
-- **Quit VRScreen**: the same clean shutdown as Ctrl-C (cursor released; when
-  started by `scripts/mirror.sh`, the script then removes its adb reverse).
+- **Quit VRScreen**: the same clean shutdown as Ctrl-C (cursor released, Mac output
+  unmuted if the sender muted it; when started by `scripts/mirror.sh`, the script then
+  removes its adb reverse).
 
 **Travel mode** (for using the headset in a moving vehicle) can't be switched from
 the Mac: Horizon OS only lets the headset's own Quick Settings toggle it. The menu
@@ -132,12 +154,46 @@ the output) and the Quick Settings item is disabled. Over Wi-Fi (`--wifi-only`) 
 items show "headset not on USB".
 
 The sliders update the headset while you drag (at most 30 messages per second, the
-final value always sent); the checkbox applies at once. The sender owns these three
-settings: it sends them to every headset that connects and stores them in
-`~/Library/Application Support/VRScreen/settings.json` (`{"curvature": 0-1000,
-"dim": 0-1000, "handGestures": true|false}`, permille; written half a second after the
-last change, read at startup; defaults 0, 0 and off; a key missing from an older file
-takes its default). The stored values are sent to clients even with `--no-menu`.
+final value always sent); the checkboxes apply at once. The sender owns these
+settings: it sends curvature, dimming and hand gestures to every headset that connects
+and stores everything in `~/Library/Application Support/VRScreen/settings.json`
+(`{"curvature": 0-1000, "dim": 0-1000, "handGestures": true|false, "audio": true|false,
+"muteMac": true|false}`, permille; written half a second after the last change, read at
+startup; defaults 0, 0, off, on and off; a key missing from an older file takes its
+default). The stored values apply even with `--no-menu`.
+
+## Audio
+
+With **Audio in headset** on (the default), the sender captures the Mac's system audio
+with the same ScreenCaptureKit stream as the screen (48 kHz stereo, its own process
+excluded), converts it to signed 16-bit little-endian PCM, re-chunks it into 10 ms
+pieces (480 frames) stamped with ScreenCaptureKit's capture time, and sends AUDIO_CONFIG
+and AUDIO messages to the connected client (protocol: [AUDIO](../docs/protocol.md)). Audio
+runs on its own queue and is not part of the frame windows; chunks that would leave the
+sender more than 150 ms after capture are dropped. About 1.55 Mbit/s. Switching the
+checkbox off stops the capture (`capturesAudio` off) and the sending at once; the
+headset drains what it has to silence. `--no-audio` forces it off and greys out both
+audio items. It needs no extra permission: Screen & System Audio Recording covers it,
+and no microphone is used. With `--source test`, the audio is synthesized: silence, plus
+a 60 ms 1 kHz beep (−10.5 dBFS) starting at exactly the capture time of the pattern's
+once-per-second white flash, for A/V sync checks.
+
+**Mac volume and mute do not affect the capture.** Measured: `afplay
+/System/Library/Sounds/Ping.aiff` captured through ScreenCaptureKit peaked at the same
+0.297 (−10.5 dBFS) with the Mac at volume 38, muted, and at volume 10. So the Mac's own
+speakers can be silenced while the headset keeps the sound:
+
+**Mute Mac while mirroring** (default off) mutes the default output device while audio
+is actually going to a headset (audio on and a client connected), and unmutes it when
+that stops: checkbox off, Audio in headset off, headset disconnected, or the sender
+exiting. It only mutes a device that was not already muted, and only unmutes the device
+it muted, so a Mac you had muted stays muted. If the default output changes while it is
+engaged, the previous device is restored and the new one muted. The unmute runs on every
+exit path: Quit, Ctrl-C, SIGTERM, SIGHUP, normal exit (atexit) and crash signals
+(SIGSEGV, SIGBUS, SIGILL, SIGABRT, SIGFPE, SIGTRAP), like the cursor freeze. Only
+`kill -9` (or a power loss) can leave the Mac muted; unmute it with the volume keys.
+Devices without a settable mute (some HDMI/DisplayPort outputs) are left playing, and
+the log says so.
 
 ## Placing the screen: shortcuts and mouse
 
@@ -199,7 +255,8 @@ macOS grants Screen Recording to the app that launches the sender (Terminal, iTe
 your IDE...), not to the binary. If capture fails with a permission error or no
 displays:
 
-1. System Settings → Privacy & Security → Screen & System Audio Recording.
+1. System Settings → Privacy & Security → Screen & System Audio Recording (this one
+   permission covers the system audio too).
 2. Enable the terminal app you run the sender from.
 3. Quit and restart that terminal app.
 
@@ -274,3 +331,9 @@ about 550 Mbit/s through the USB tunnel.
 - **Encoding thread**: the low-latency encoder encodes synchronously inside
   `VTCompressionSessionEncodeFrame` (~15 ms at 4K on an M-series Mac), so it runs on its
   own queue, one frame at a time, and does not delay networking or PONGs.
+- **Audio path**: ScreenCaptureKit delivers Float32 planar buffers of 960 frames (20 ms)
+  about 25 ms after capture, also during silence; a re-chunker converts them to s16le
+  and cuts 10 ms chunks whose timestamps follow the capture clock (a buffer more than
+  5 ms off the expected time is a discontinuity: the partial chunk is dropped and timing
+  restarts). Queued AUDIO older than 150 ms is removed from the client's send queue
+  before it reaches the socket; audio already in the kernel buffer cannot be recalled.

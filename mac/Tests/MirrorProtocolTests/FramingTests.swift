@@ -15,6 +15,9 @@ private let sampleMessages: [Message] = [
     .frameAck(framesConsumed: 0xFFFF_FFFF),
     .frameAck(framesConsumed: 1),
     .config(ConfigMessage(codec: .h264, width: 1920, height: 1080, parameterSets: Data())),
+    .audioConfig(.standard),
+    .audio(AudioMessage(captureTimeMicros: 1_234_567, pcm: Data((0..<1920).map { UInt8(truncatingIfNeeded: $0 * 7) }))),
+    .audio(AudioMessage(captureTimeMicros: 1_244_567, pcm: Data())),
 ]
 
 private func stream() -> Data {

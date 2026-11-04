@@ -1,8 +1,8 @@
 import AppKit
 import MirrorProtocol
 
-/// The menu-bar icon: connection status, curvature and dimming sliders, re-center,
-/// reset, travel mode (USB only) and quit. Main thread only.
+/// The menu-bar icon: connection status, curvature and dimming sliders, hand gestures,
+/// audio, re-center, reset, travel mode (USB only) and quit. Main thread only.
 final class StatusMenu: NSObject, NSMenuDelegate {
     /// Slider drags are sent at most this often (the final value always goes out).
     static let sendInterval: TimeInterval = 1.0 / 30
@@ -30,6 +30,10 @@ final class StatusMenu: NSObject, NSMenuDelegate {
     private var curvatureRow: SliderRow?
     private var dimRow: SliderRow?
     private var handGesturesItem: NSMenuItem?
+    private var audioItem: NSMenuItem?
+    private var muteMacItem: NSMenuItem?
+    /// False with --no-audio: the audio items are shown disabled.
+    private let audioAvailable: Bool
     private var throttle = ValueThrottle<DisplaySettings>(interval: StatusMenu.sendInterval)
     private var pendingSave: DispatchWorkItem?
     private let travelModeLine = NSMenuItem(title: TravelModeState.notOnUSB.menuTitle, action: nil, keyEquivalent: "")
@@ -41,12 +45,14 @@ final class StatusMenu: NSObject, NSMenuDelegate {
     /// `onSettingsChange` gets every (throttled) settings change; `onCommand` gets
     /// RECENTER / RESET; `onQuit` must shut the sender down.
     init(store: DisplaySettingsStore, settings: DisplaySettings, travelModeSource: TravelModeSource,
+         audioAvailable: Bool,
          onSettingsChange: @escaping (DisplaySettings) -> Void,
          onCommand: @escaping (ControlCommand) -> Void,
          onQuit: @escaping () -> Void) {
         self.store = store
         self.settings = settings
         self.travelModeSource = travelModeSource
+        self.audioAvailable = audioAvailable
         self.onSettingsChange = onSettingsChange
         self.onCommand = onCommand
         self.onQuit = onQuit
@@ -94,6 +100,18 @@ final class StatusMenu: NSObject, NSMenuDelegate {
         hint.indentationLevel = 1
         menu.addItem(hint)
         menu.addItem(.separator())
+        let audio = actionItem("Audio in headset", #selector(toggleAudio))
+        audio.toolTip = audioAvailable
+            ? "Play the Mac's sound in the headset"
+            : "Off: the sender was started with --no-audio"
+        menu.addItem(audio)
+        audioItem = audio
+        let muteMac = actionItem("Mute Mac while mirroring", #selector(toggleMuteMac))
+        muteMac.toolTip = "Silence the Mac's speakers while its sound goes to the headset; restored afterwards"
+        menu.addItem(muteMac)
+        muteMacItem = muteMac
+        showAudioState()
+        menu.addItem(.separator())
         menu.addItem(actionItem("Re-center", #selector(recenter)))
         menu.addItem(actionItem("Reset placement", #selector(resetPlacement)))
         menu.addItem(.separator())
@@ -109,7 +127,8 @@ final class StatusMenu: NSObject, NSMenuDelegate {
         item.menu = menu
         statusItem = item
         log("menu: status item installed (curvature \(settings.curvature / 10) %, dim \(settings.dim / 10) %, "
-            + "settings in \(store.url.path))")
+            + "audio \(audioAvailable ? (settings.audio ? "on" : "off") : "off (--no-audio)"), "
+            + "mute Mac \(settings.muteMac ? "on" : "off"), settings in \(store.url.path))")
         refreshTravelMode()
     }
 
@@ -143,9 +162,8 @@ final class StatusMenu: NSObject, NSMenuDelegate {
 
     @objc private func sliderMoved(_ sender: NSSlider) {
         guard let curvatureRow, let dimRow else { return }
-        settings = DisplaySettings(curvature: DisplaySettings.permille(fromPercent: curvatureRow.slider.doubleValue),
-                                   dim: DisplaySettings.permille(fromPercent: dimRow.slider.doubleValue),
-                                   handGestures: settings.handGestures)
+        settings.curvature = DisplaySettings.permille(fromPercent: curvatureRow.slider.doubleValue)
+        settings.dim = DisplaySettings.permille(fromPercent: dimRow.slider.doubleValue)
         curvatureRow.showValue()
         dimRow.showValue()
         let now = ProcessInfo.processInfo.systemUptime
@@ -170,6 +188,29 @@ final class StatusMenu: NSObject, NSMenuDelegate {
         handGesturesItem?.state = settings.handGestures ? .on : .off
         onSettingsChange(settings) // a single click: no throttling
         scheduleSave()
+    }
+
+    @objc private func toggleAudio() {
+        settings.audio.toggle()
+        applyAudioChange()
+    }
+
+    @objc private func toggleMuteMac() {
+        settings.muteMac.toggle()
+        applyAudioChange()
+    }
+
+    private func applyAudioChange() {
+        showAudioState()
+        onSettingsChange(settings) // a single click: no throttling
+        scheduleSave()
+    }
+
+    private func showAudioState() {
+        audioItem?.state = audioAvailable && settings.audio ? .on : .off
+        audioItem?.isEnabled = audioAvailable
+        muteMacItem?.state = settings.muteMac ? .on : .off
+        muteMacItem?.isEnabled = audioAvailable && settings.audio
     }
 
     @objc private func recenter() { onCommand(.recenter) }
@@ -252,7 +293,8 @@ final class StatusMenu: NSObject, NSMenuDelegate {
         do {
             try store.save(settings)
             log("menu: curvature \(settings.curvature / 10) %, dim \(settings.dim / 10) %, "
-                + "hand gestures \(settings.handGestures ? "on" : "off") (saved)")
+                + "hand gestures \(settings.handGestures ? "on" : "off"), audio \(settings.audio ? "on" : "off"), "
+                + "mute Mac \(settings.muteMac ? "on" : "off") (saved)")
         } catch {
             log("menu: could not save settings to \(store.url.path): \(error)")
         }

@@ -56,6 +56,30 @@ import Testing
     #expect(DisplaySettings.permille(fromPercent: -3) == 0)
 }
 
+@Test func audioSettingsPersistWithDefaults() throws {
+    let dir = FileManager.default.temporaryDirectory.appendingPathComponent("qm-settings-\(UUID().uuidString)")
+    defer { try? FileManager.default.removeItem(at: dir) }
+    let store = DisplaySettingsStore(url: dir.appendingPathComponent("VRScreen/settings.json"))
+    // Audio on and Mac mute off by default, also for files written before they existed.
+    #expect(DisplaySettings.defaults.audio == true)
+    #expect(DisplaySettings.defaults.muteMac == false)
+    try FileManager.default.createDirectory(at: store.url.deletingLastPathComponent(), withIntermediateDirectories: true)
+    try Data(#"{"curvature": 801, "dim": 255, "handGestures": true}"#.utf8).write(to: store.url)
+    #expect(store.load() == DisplaySettings(curvature: 801, dim: 255, handGestures: true, audio: true, muteMac: false))
+    try store.save(DisplaySettings(curvature: 10, dim: 20, handGestures: false, audio: false, muteMac: true))
+    let json = try String(contentsOf: store.url, encoding: .utf8)
+    #expect(json.contains(#""audio" : false"#) && json.contains(#""muteMac" : true"#))
+    #expect(store.load() == DisplaySettings(curvature: 10, dim: 20, handGestures: false, audio: false, muteMac: true))
+    // Audio settings are Mac-side only: no CONTROL for them.
+    #expect(DisplaySettings(curvature: 1, dim: 2, audio: false, muteMac: true).commands
+        == [.setCurvature(1), .setDim(2), .setHandGestures(false)])
+}
+
+@Test func noAudioOption() throws {
+    #expect(try SenderOptions.parse([]).audio == true)
+    #expect(try SenderOptions.parse(["--no-audio", "--source", "test"]).audio == false)
+}
+
 @Test func menuStatusLine() {
     #expect(StatusMenu.statusText(forClientAddress: nil) == "No headset connected")
     #expect(StatusMenu.statusText(forClientAddress: "127.0.0.1:50123") == "Headset: USB (127.0.0.1)")

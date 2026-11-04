@@ -11,6 +11,7 @@
 #include <vector>
 
 #include "screen_source.h"
+#include "wire.h"
 
 namespace qm {
 
@@ -68,6 +69,12 @@ public:
     virtual bool onFrame(const EncodedFrame& frame) = 0;
     // CONTROL message from the Mac (shortcuts, menu-bar icon): move, resize or restyle the screen.
     virtual void onControl(const ScreenCommand& command) = 0;
+    // AUDIO_CONFIG: the format of the AUDIO messages that follow (before the first one of a
+    // connection, again if it changes).
+    virtual void onAudioConfig(const wire::AudioFormat& format) = 0;
+    // AUDIO: interleaved little-endian s16 PCM (unaligned) whose first sample was captured at
+    // `captureMicros` (sender clock, like FRAME). Not acknowledged.
+    virtual void onAudio(int64_t captureMicros, const uint8_t* pcm, size_t bytes) = 0;
     virtual void onDisconnected(const std::string& reason) = 0;
     // About once per second while connected. Return false to reconnect (e.g. the decoder died).
     virtual bool onStatsTick(const LinkStats& stats) = 0;
