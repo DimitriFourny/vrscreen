@@ -1,0 +1,44 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    android:installLocation="auto">
+
+    <!-- Head tracking marks this as a VR app; Horizon OS refuses to launch it immersive without it. -->
+    <uses-feature android:name="android.hardware.vr.headtracking" android:required="true" android:version="1" />
+    <!-- XR_FB_passthrough is only granted to apps that declare the passthrough feature. -->
+    <uses-feature android:name="com.oculus.feature.PASSTHROUGH" android:required="true" />
+    <uses-feature android:glEsVersion="0x00030002" android:required="true" />
+
+    <!-- The screen stream arrives over TCP (adb reverse or Wi-Fi) from milestone 3 on. -->
+    <uses-permission android:name="android.permission.INTERNET" />
+    <!-- org.khronos.openxr.permission.OPENXR(_SYSTEM) and the runtime-broker <queries> are merged
+         in from the openxr_loader_for_android AAR manifest. -->
+
+    <application
+        android:allowBackup="false"
+        android:hasCode="false"
+        android:label="@string/app_name">
+
+        <meta-data android:name="com.oculus.supportedDevices" android:value="quest2|questpro|quest3|quest3s" />
+        <!-- Show passthrough instead of black while the app launches. -->
+        <meta-data android:name="com.oculus.ossplash.background" android:value="passthrough-contextual" />
+
+        <activity
+            android:name="android.app.NativeActivity"
+            android:configChanges="density|keyboard|keyboardHidden|navigation|orientation|screenLayout|screenSize|uiMode"
+            android:excludeFromRecents="false"
+            android:exported="true"
+            android:launchMode="singleTask"
+            android:resizeableActivity="false"
+            android:screenOrientation="landscape"
+            android:theme="@android:style/Theme.Black.NoTitleBar.Fullscreen">
+
+            <meta-data android:name="android.app.lib_name" android:value="questmirror" />
+
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="com.oculus.intent.category.VR" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity>
+    </application>
+</manifest>
