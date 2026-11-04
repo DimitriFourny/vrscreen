@@ -135,8 +135,15 @@ flat and the surroundings normal):
   curves it around your eyes. Its centre, width (= arc length), facing and all the placement
   controls stay the same; the arc is capped at 2.8 rad (160°), beyond which the radius grows. The
   status panel stays flat. If the runtime lacked the extension the screen would stay flat (logged).
-- **Dim** 0–1000 ‰ darkens the passthrough surroundings towards black (passthrough layer opacity =
-  1 − dim, no edge rendering); the screen itself is never dimmed.
+- **Dim** 0–1000 ‰ darkens the passthrough surroundings towards black, perceptually: 500 looks
+  about half as bright. The compositor fades in linear light, so the passthrough layer's opacity
+  is (1 − dim)^1.9: on the headset, exponent 1.8 gave 76/54/30 % brightness at 250/500/750 and
+  2.0 gave 71/46/20 %, so 1.9 should land near 75/50/25 % (`dim_controller.h`; tune with
+  `debug.questmirror.dimgamma`). No edge rendering, and the screen itself is never dimmed.
+  For safety the room is only dimmed while the screen shows a picture: when the stream goes away
+  (searching, connecting, waiting for the first frame, decoder restart) the dim is kept for 1.5 s,
+  so a quick reconnect does not flash, then fades out over 0.3 s; it fades back in over 0.3 s
+  once a picture is shown again. Coming back to the app (session visible again) starts undimmed.
 
 Orientation: grabbing, orbiting, recenter and reset turn the screen towards your head (yaw, and
 pitch when it sits above or below eye height); it never rolls, so it stays upright. Sliding and
@@ -194,6 +201,8 @@ compared with none. Mode 0 submits the quad without any layer-settings struct.
   a hand-tracking pinch can reuse it with a different pose source.
 - `xr_math.h` — vector/quaternion helpers, `facing()` (upright, facing a point), the slide/orbit
   maths and `cylinderFor()` (cylinder pose, radius and arc for the curved screen).
+- `dim_controller.h` — `DimController` (when the surroundings may be dimmed: grace, fades) and
+  `passthroughOpacity()` (perceptual SET_DIM mapping).
 - `screen_source.h` — the seam between the XR shell and the content (`ScreenSource`/`ScreenHost`,
   `ScreenCommand`).
 - `mediacodec_source.{h,cpp}` — the `ScreenSource`: glues the network client to the decoder,

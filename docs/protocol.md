@@ -204,7 +204,7 @@ as soon as the user acts; it is not subject to the frame windows of "Flow contro
 | `0x08`  | DISTANCE_FINE | `v i16`                | Distance × 1.1^(v/100); positive = farther. `v = 100` equals one DISTANCE step. |
 | `0x09`  | SIZE_FINE     | `v i16`                | Width × 1.1^(v/100); positive = bigger. `v = 100` equals one SIZE step. |
 | `0x0A`  | SET_CURVATURE | `value u16`            | **Absolute** curvature in permille, clamped to 0–1000: 0 = flat; otherwise the screen bends around the viewer on a cylinder of radius = viewing distance / (value/1000), so 1000 = radius equal to the viewing distance. |
-| `0x0B`  | SET_DIM       | `value u16`            | **Absolute** dimming of the surroundings (passthrough) in permille, clamped to 0–1000: 0 = normal passthrough, 1000 = fully black. Never dims the screen itself. |
+| `0x0B`  | SET_DIM       | `value u16`            | **Absolute**, **perceptual** dimming of the surroundings (passthrough) in permille, clamped to 0–1000: 0 = normal passthrough, 500 ≈ half as bright, 1000 = fully black. The client maps the value to its compositor's controls so that brightness falls roughly linearly. Never dims the screen itself. |
 
 - `i8` is a signed byte, `i16` a signed and `u16` an unsigned big-endian 16-bit integer
   (two's complement for signed): `FF` = −1, `FF E7` = −25, `03 E8` = 1000.
@@ -226,6 +226,11 @@ as soon as the user acts; it is not subject to the frame windows of "Flow contro
   change; slider drags on the Mac are throttled to at most 30 messages per second, the
   final value always included. Clients apply them whenever they arrive, before or after
   CONFIG, and keep them across CONFIG changes.
+- SET_DIM is a wish that applies while a picture is on screen: a client must not dim the
+  surroundings while it shows no picture (searching, connecting, waiting for the first
+  frame), since the user then needs to see the room. The reference client keeps the dim
+  for 1.5 s after the picture goes away (brief reconnects do not flash) and fades over
+  0.3 s in both directions.
 
 ### `0x10` PING (client → server)
 

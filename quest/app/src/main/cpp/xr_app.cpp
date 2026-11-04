@@ -62,6 +62,7 @@ constexpr const char* kWidthProperty = "debug.questmirror.width";
 // "dx dy dz [yawDegrees]": simulate a grab that starts at the head pose and moves the grabber by
 // (dx, dy, dz) metres in LOCAL space, turned by yaw, then releases (exercises Grab without buttons).
 constexpr const char* kSimGrabProperty = "debug.questmirror.simgrab";
+constexpr const char* kDimGammaProperty = "debug.questmirror.dimgamma";  // tuning: opacity = (1 - dim)^gamma
 
 // Initial screen Surface size; the stream's CONFIG resizes it.
 constexpr int32_t kInitialSurfaceWidth = 1920;
@@ -578,6 +579,11 @@ void XrApp::updateVisibility() {
     visible_ = visible;
     LOGI("Content %s", visible ? "visible: starting screen source" : "hidden: stopping screen source");
     statusDrawn_ = false;  // redraw the status panel once visible again
+    if (visible) {
+        // No picture yet after a resume: show the room at once, fade the dim back with the picture.
+        dimmer_.reset();
+        setPassthroughOpacity(1.0f);
+    }
     source_.onVisible(visible);
 }
 
@@ -745,6 +751,17 @@ void XrApp::pollDebugProperties() {
         lastWidthProp_ = width;
         if (!width.empty()) setPlacement(placement_.distance, std::strtof(width.c_str(), nullptr), kWidthProperty);
     }
+    const std::string dimGamma = readProperty(kDimGammaProperty);
+    if (dimGamma != lastDimGammaProp_) {
+        lastDimGammaProp_ = dimGamma;
+        const float gamma = dimGamma.empty() ? kDimGamma : std::strtof(dimGamma.c_str(), nullptr);
+        if (gamma > 0.0f) {
+            dimGamma_ = gamma;
+            LOGI("Dim gamma %.2f (%s): opacity at 250/500/750 = %.2f/%.2f/%.2f", gamma,
+                 dimGamma.empty() ? "default" : kDimGammaProperty, passthroughOpacity(0.25f, gamma),
+                 passthroughOpacity(0.5f, gamma), passthroughOpacity(0.75f, gamma));
+        }
+    }
     const std::string simGrab = readProperty(kSimGrabProperty);
     if (simGrab != lastSimGrabProp_) {
         lastSimGrabProp_ = simGrab;
@@ -791,7 +808,9 @@ void XrApp::applyScreenCommands() {
             continue;
         }
         if (c.kind == Kind::SetDim) {
-            setPassthroughDim(static_cast<float>(c.a) / 1000.0f);
+            dimmer_.setRequested(static_cast<float>(c.a) / 1000.0f);
+            LOGI("Mac CONTROL SET_DIM %d permille (passthrough opacity %.2f while a picture is shown)", c.a,
+                 passthroughOpacity(dimmer_.requested(), dimGamma_));
             continue;
         }
         const char* name = c.kind == Kind::Recenter       ? "RECENTER"
@@ -868,20 +887,27 @@ void XrApp::applyScreenCommands() {
     }
 }
 
-void XrApp::setPassthroughDim(float dim) {
-    dim = std::clamp(dim, 0.0f, 1.0f);
-    if (dim == dim_ || passthroughLayer_ == XR_NULL_HANDLE) return;
+void XrApp::setPassthroughOpacity(float opacity) {
+    opacity = std::clamp(opacity, 0.0f, 1.0f);
+    // Skip imperceptible changes, but always land exactly on 0 and 1.
+    if (passthroughLayer_ == XR_NULL_HANDLE ||
+        (std::fabs(opacity - appliedOpacity_) < 0.002f && opacity != 0.0f && opacity != 1.0f) ||
+        opacity == appliedOpacity_) {
+        return;
+    }
     // Fade the passthrough towards the black behind it; no edge rendering, so nothing glows.
     XrPassthroughStyleFB style{XR_TYPE_PASSTHROUGH_STYLE_FB};
-    style.textureOpacityFactor = 1.0f - dim;
+    style.textureOpacityFactor = opacity;
     style.edgeColor = {0.0f, 0.0f, 0.0f, 0.0f};
     const XrResult r = pfnPassthroughLayerSetStyleFB(passthroughLayer_, &style);
     if (XR_FAILED(r)) {
-        LOGE("xrPassthroughLayerSetStyleFB(opacity %.2f): %s", style.textureOpacityFactor, resultString(r).c_str());
+        LOGE("xrPassthroughLayerSetStyleFB(opacity %.2f): %s", opacity, resultString(r).c_str());
         return;
     }
-    dim_ = dim;
-    LOGI("Mac CONTROL SET_DIM %.0f permille: passthrough opacity %.2f", dim * 1000.0f, style.textureOpacityFactor);
+    if (opacity == 1.0f || opacity == passthroughOpacity(dimmer_.requested(), dimGamma_)) {
+        LOGI("Passthrough opacity %.2f%s", opacity, opacity == 1.0f ? " (surroundings not dimmed)" : "");
+    }
+    appliedOpacity_ = opacity;
 }
 
 void XrApp::flushControlBurstLog() {
@@ -1035,6 +1061,8 @@ void XrApp::renderFrame() {
     }
 
     const bool picture = source_.pictureReady();
+    // Dim the surroundings only while the screen shows a picture (DimController: grace + fades).
+    setPassthroughOpacity(passthroughOpacity(dimmer_.update(picture && visible_, dt), dimGamma_));
     // Draw only when the panel is submitted this frame: a runtime that consumes buffers only from
     // composited layers would otherwise fill the queue and block ANativeWindow_lock.
     const bool statusSubmitted = visible_ && frameState.shouldRender && quadPlaced_ && !picture;

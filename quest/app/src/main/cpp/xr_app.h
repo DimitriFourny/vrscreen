@@ -1,5 +1,6 @@
 #pragma once
 
+#include "dim_controller.h"
 #include "grab.h"
 #include "screen_source.h"
 #include "status_panel.h"
@@ -95,8 +96,8 @@ private:
     void placeInFront(const XrPosef& head);
     void updateQuadPose();
     void applyScreenCommands();
-    // Applies a SET_DIM value (0..1) to the passthrough layer's style.
-    void setPassthroughDim(float dim);
+    // Sets the passthrough layer's opacity (1 = normal, 0 = black surroundings) if it changed.
+    void setPassthroughOpacity(float opacity);
     void setPlacement(float distance, float width, const char* reason);
     void loadPlacement();
     void savePlacement();
@@ -167,7 +168,9 @@ private:
     // Presentation, set by the Mac (re-sent on every connect, never persisted here).
     bool hasCylinder_ = false;  // XR_KHR_composition_layer_cylinder enabled
     float curvature_ = 0.0f;    // 0 flat .. 1 cylinder centred on the viewer
-    float dim_ = 0.0f;          // 0 normal .. 1 black passthrough
+    DimController dimmer_;         // wanted dim (SET_DIM) vs. what is shown (only with a picture)
+    float appliedOpacity_ = 1.0f;  // passthrough style currently set
+    float dimGamma_ = kDimGamma;   // debug.questmirror.dimgamma overrides it for tuning
     PFN_xrPassthroughLayerSetStyleFB pfnPassthroughLayerSetStyleFB = nullptr;
 
     // Placement
@@ -200,6 +203,7 @@ private:
     std::string lastDistanceProp_;
     std::string lastWidthProp_;
     std::string lastSimGrabProp_;
+    std::string lastDimGammaProp_;
     uint32_t controlBurstCount_ = 0;  // continuous Mac CONTROL commands since the last save
     XrPosef controlBurstStart_{{0, 0, 0, 1}, {0, 0, 0}};
     ScreenCommand::Kind controlBurstKind_ = ScreenCommand::Kind::Orbit;
