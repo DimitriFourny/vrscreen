@@ -87,7 +87,7 @@ private:
     // Runs the grabbers (controller grips, hand gestures, debug simulations) and moves the screen
     // while held. One grabber at a time: the first wins.
     void updateGrabs(double dtSeconds, XrTime time);
-    // Hand samples for this frame: the debug.questmirror.simpinch script while it runs, else tracking.
+    // Hand samples for this frame: the debug.vrscreen.simpinch script while it runs, else tracking.
     void readHands(double dtSeconds, XrTime time, HandSample hands[2]);
     bool screenGrabbed() const;
     void onGrabReleased(const char* who);
@@ -182,7 +182,7 @@ private:
     float curvature_ = 0.0f;    // 0 flat .. 1 cylinder centred on the viewer
     DimController dimmer_;         // wanted dim (SET_DIM) vs. what is shown (only with a picture)
     float appliedOpacity_ = 1.0f;  // passthrough style currently set
-    float dimGamma_ = kDimGamma;   // debug.questmirror.dimgamma overrides it for tuning
+    float dimGamma_ = kDimGamma;   // debug.vrscreen.dimgamma overrides it for tuning
     PFN_xrPassthroughLayerSetStyleFB pfnPassthroughLayerSetStyleFB = nullptr;
 
     // Placement
@@ -199,7 +199,7 @@ private:
     XrPosef headPose_{{0, 0, 0, 1}, {0, 0, 0}};  // this frame's head pose in LOCAL space
     bool headValid_ = false;
 
-    // Grabbing: left grip, right grip, and the debug.questmirror.simgrab simulation.
+    // Grabbing: left grip, right grip, and the debug.vrscreen.simgrab simulation.
     Grab grabs_[3];
     int simGrabStep_ = 0;  // > 0 while a simulated grab runs (frames left)
     XrPosef simGrabStart_{{0, 0, 0, 1}, {0, 0, 0}};
@@ -212,7 +212,7 @@ private:
     bool handTracked_[2] = {false, false};  // for logging changes
     double handsUnseenSeconds_ = 0;         // enabled, focused and no hand tracked: hint once
     bool handsHintLogged_ = false;
-    // debug.questmirror.simpinch: scripted pinch through HandGestures (see startSimulatedPinch).
+    // debug.vrscreen.simpinch: scripted pinch through HandGestures (see startSimulatedPinch).
     double simPinchElapsed_ = -1;  // < 0: not running
     double simPinchSeconds_ = 0;
     int simPinchHands_ = 1;

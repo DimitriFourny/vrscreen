@@ -30,7 +30,7 @@ struct SenderOptions {
     var controlOnConnect: [DebugControlStep] = []
 
     static let usage = """
-    Usage: quest-mirror-sender [options]
+    Usage: vrscreen-sender [options]
 
       --source screen|test     Frame source (default screen). "test" is a synthetic
                                pattern that needs no Screen Recording permission.

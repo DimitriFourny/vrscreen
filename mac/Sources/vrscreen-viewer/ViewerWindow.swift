@@ -20,7 +20,7 @@ final class ViewerWindow: NSObject, NSApplicationDelegate {
         view.layer = displayLayer
         view.wantsLayer = true
         window.contentView = view
-        window.title = "Quest Mirror Viewer — connecting…"
+        window.title = "VRScreen Viewer — connecting…"
         window.center()
     }
 
@@ -36,7 +36,7 @@ final class ViewerWindow: NSObject, NSApplicationDelegate {
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { true }
 
     func setStatus(_ text: String) {
-        window.title = "Quest Mirror Viewer — \(text)"
+        window.title = "VRScreen Viewer — \(text)"
     }
 
     func display(_ image: CVPixelBuffer) {

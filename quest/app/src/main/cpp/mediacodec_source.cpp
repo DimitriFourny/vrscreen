@@ -24,7 +24,7 @@ std::string clip(const std::string& s, size_t max) {
 }  // namespace
 
 MediaCodecSource::MediaCodecSource(const std::string& filesDir) : client_(*this, filesDir) {
-    setStatus("Quest Mirror\nStarting...");
+    setStatus("VRScreen\nStarting...");
 }
 
 MediaCodecSource::~MediaCodecSource() {
@@ -100,12 +100,12 @@ void MediaCodecSource::setStatus(const std::string& text) {
 
 void MediaCodecSource::onSearching(const SearchState& state) {
     connected_ = false;
-    std::string text = "Quest Mirror\n";
+    std::string text = "VRScreen\n";
     if (!state.overrideEndpoint.empty()) {
-        text += "Connecting to " + state.overrideEndpoint + " ...\n(set by debug.questmirror.host)";
+        text += "Connecting to " + state.overrideEndpoint + " ...\n(set by debug.vrscreen.host)";
         if (!state.wifiResult.empty()) text += "\nLast try: " + clip(state.wifiResult, 38);
     } else {
-        text += "Looking for the Mac over USB and Wi-Fi ...\nStart quest-mirror-sender on the Mac.";
+        text += "Looking for the Mac over USB and Wi-Fi ...\nStart vrscreen-sender on the Mac.";
         if (!state.usbResult.empty()) text += "\nUSB: " + clip(state.usbResult, 43);
         if (!state.wifiResult.empty()) text += "\nWi-Fi: " + clip(state.wifiResult, 41);
     }
@@ -116,7 +116,7 @@ void MediaCodecSource::onSearching(const SearchState& state) {
 void MediaCodecSource::onConnected(const std::string& transport) {
     transport_ = transport;
     connected_ = true;
-    setStatus("Quest Mirror\nConnected over\n" + clip(transport, 50) + "\nWaiting for video from the Mac...");
+    setStatus("VRScreen\nConnected over\n" + clip(transport, 50) + "\nWaiting for video from the Mac...");
 }
 
 bool MediaCodecSource::onConfig(const StreamConfig& config) {
@@ -131,7 +131,7 @@ bool MediaCodecSource::onConfig(const StreamConfig& config) {
     char line[96];
     std::snprintf(line, sizeof(line), "%s %dx%d", config.codec == Codec::HEVC ? "HEVC" : "H.264", config.width,
                   config.height);
-    setStatus("Quest Mirror\nConnected over\n" + clip(transport_, 50) + "\n" + line + " - waiting for a picture...");
+    setStatus("VRScreen\nConnected over\n" + clip(transport_, 50) + "\n" + line + " - waiting for a picture...");
     return true;
 }
 

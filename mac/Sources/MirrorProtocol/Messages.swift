@@ -3,7 +3,7 @@ import Foundation
 /// Wire protocol v1 constants. See `docs/protocol.md` (the binding contract).
 public enum WireProtocol {
     /// Hello magic sent by the server right after the TCP connection is established.
-    public static let magic: [UInt8] = Array("QMIR".utf8)
+    public static let magic: [UInt8] = Array("VRSC".utf8)
     public static let version: UInt16 = 1
     /// `magic (4) | version u16`
     public static let helloSize = 6
@@ -198,7 +198,7 @@ public struct MessageReader: Sendable {
     /// Version from the server hello, once received (client side only).
     public private(set) var peerVersion: UInt16?
 
-    /// - Parameter expectHello: true on the client side (the stream starts with `QMIR | version`).
+    /// - Parameter expectHello: true on the client side (the stream starts with `VRSC | version`).
     public init(expectHello: Bool) {
         awaitingHello = expectHello
     }

@@ -1,6 +1,6 @@
 import Foundation
 import Testing
-@testable import quest_mirror_sender
+@testable import vrscreen_sender
 
 @Test func travelModeParsing() {
     // Excerpt of `dumpsys tracking` on Horizon OS 209: the unrelated "TravelMode: off"

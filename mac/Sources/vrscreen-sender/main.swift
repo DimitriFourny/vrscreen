@@ -13,7 +13,7 @@ do {
     exit(2)
 }
 
-let queue = DispatchQueue(label: "quest-mirror.sender", qos: .userInteractive)
+let queue = DispatchQueue(label: "vrscreen.sender", qos: .userInteractive)
 let encoder = VideoEncoder(codec: options.codec, bitrate: Int(options.bitrateMbps * 1_000_000),
                            fps: options.fps, keyframeIntervalSeconds: options.keyframeIntervalSeconds)
 let server = MirrorServer(port: options.port, maxFramesInFlight: UInt32(options.maxFramesInFlight), queue: queue)

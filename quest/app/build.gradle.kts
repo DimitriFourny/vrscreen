@@ -3,13 +3,13 @@ plugins {
 }
 
 android {
-    namespace = "com.df0.questmirror"
+    namespace = "com.df0.vrscreen"
     compileSdk = 36
     buildToolsVersion = "36.1.0"
     ndkVersion = "30.0.16248370"
 
     defaultConfig {
-        applicationId = "com.df0.questmirror"
+        applicationId = "com.df0.vrscreen"
         minSdk = 32
         targetSdk = 34
         versionCode = 1

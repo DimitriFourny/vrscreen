@@ -1,7 +1,7 @@
-# Quest Mirror wire protocol, version 1
+# VRScreen wire protocol, version 1
 
-This is the contract between the Mac sender (`quest-mirror-sender`) and any client:
-the Mac test viewer (`quest-mirror-viewer`) and the Quest app (C++/NDK,
+This is the contract between the Mac sender (`vrscreen-sender`) and any client:
+the Mac test viewer (`vrscreen-viewer`) and the Quest app (C++/NDK,
 `AMediaCodec`). A client can be written from this document alone.
 
 ## Transport
@@ -25,7 +25,7 @@ integers big-endian, as for TCP.
   turns it off).
 - While not connected, the client sends DISCOVER **once per second** to
   `255.255.255.255` **and** the directed broadcast address of its subnet (e.g.
-  `192.168.1.255` for `192.168.1.35/24`), UDP port 7778. Sockets need `SO_BROADCAST`.
+  `192.168.1.255` for `192.168.1.42/24`), UDP port 7778. Sockets need `SO_BROADCAST`.
 - The sender answers **every** valid DISCOVER with one ANNOUNCE, **unicast to the
   datagram's source address and port**, so the client just reads replies on the
   socket it sent from (no multicast lock or broadcast reception needed). A client may
@@ -38,7 +38,7 @@ DISCOVER (client → broadcast), 7 bytes:
 
 | Offset | Size | Field   | Value                        |
 |-------:|-----:|---------|------------------------------|
-| 0      | 4    | magic   | ASCII `QMIR` = `51 4D 49 52` |
+| 0      | 4    | magic   | ASCII `VRSC` = `56 52 53 43` |
 | 4      | 1    | type    | `0x01` DISCOVER              |
 | 5      | 2    | version | `u16` = `1`                  |
 
@@ -46,7 +46,7 @@ ANNOUNCE (sender → client, unicast), 10 + `nameLen` bytes:
 
 | Offset | Size      | Field   | Value                                                  |
 |-------:|----------:|---------|--------------------------------------------------------|
-| 0      | 4         | magic   | ASCII `QMIR`                                           |
+| 0      | 4         | magic   | ASCII `VRSC`                                           |
 | 4      | 1         | type    | `0x02` ANNOUNCE                                        |
 | 5      | 2         | version | `u16` = `1`                                            |
 | 7      | 2         | tcpPort | `u16`, the sender's TCP port                           |
@@ -58,13 +58,13 @@ The sender's address is the ANNOUNCE's **source IP**; connect to `sourceIP:tcpPo
 Examples:
 
 ```
-DISCOVER:                       51 4D 49 52 01 00 01
-ANNOUNCE port 7777, name "Mac": 51 4D 49 52 02 00 01 1E 61 03 4D 61 63
+DISCOVER:                       56 52 53 43 01 00 01
+ANNOUNCE port 7777, name "Mac": 56 52 53 43 02 00 01 1E 61 03 4D 61 63
 ```
 
 Client connection policy (informative; what the Quest app does):
 
-1. If `debug.questmirror.host` is set, connect only there.
+1. If `debug.vrscreen.host` is set, connect only there.
 2. Otherwise try `127.0.0.1:<port>` first: with `adb reverse` set up this is the USB
    tunnel, and without it the connection is refused at once.
 3. Otherwise connect to the first sender that ANNOUNCEs.
@@ -83,7 +83,7 @@ Right after the TCP connection is established, the server sends 6 bytes:
 
 | Offset | Size | Field   | Value                        |
 |-------:|-----:|---------|------------------------------|
-| 0      | 4    | magic   | ASCII `QMIR` = `51 4D 49 52` |
+| 0      | 4    | magic   | ASCII `VRSC` = `56 52 53 43` |
 | 4      | 2    | version | `u16` = `1` (`00 01`)        |
 
 A client MUST check both fields and close the connection if either is wrong.
@@ -349,7 +349,7 @@ frames as they hand them to the decoder.
 
 ## Example byte sequences
 
-Hello: `51 4D 49 52 00 01`
+Hello: `56 52 53 43 00 01`
 
 PING with `clientTimeMicros = 0x0A0B0C0D0E0F1011`:
 
@@ -389,7 +389,7 @@ FRAME, keyframe, `captureTimeMicros = 2`, access unit `00 00 00 01 26 01 ...`:
 ## Typical session
 
 ```
-server → client  hello  QMIR 0001
+server → client  hello  VRSC 0001
 server → client  CONFIG codec=2 3840x2160 (VPS SPS PPS, ~100 B)
 server → client  CONTROL SET_CURVATURE 350, SET_DIM 0, SET_HAND_GESTURES 0 (current settings)
 server → client  FRAME  key=1 (VPS SPS PPS + IDR slices)

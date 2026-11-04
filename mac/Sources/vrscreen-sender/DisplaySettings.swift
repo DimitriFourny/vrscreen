@@ -37,14 +37,14 @@ struct DisplaySettings: Codable, Equatable {
     }
 }
 
-/// JSON file store: `~/Library/Application Support/QuestMirror/settings.json`.
+/// JSON file store: `~/Library/Application Support/VRScreen/settings.json`.
 /// A missing or unreadable file yields the defaults.
 struct DisplaySettingsStore {
     let url: URL
 
     static var standard: DisplaySettingsStore {
         let base = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
-        return DisplaySettingsStore(url: base.appendingPathComponent("QuestMirror/settings.json"))
+        return DisplaySettingsStore(url: base.appendingPathComponent("VRScreen/settings.json"))
     }
 
     func load() -> DisplaySettings {

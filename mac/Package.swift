@@ -13,12 +13,12 @@ let testSwiftSettings: [SwiftSetting] =
     : []
 
 let package = Package(
-    name: "QuestMirror",
+    name: "VRScreen",
     platforms: [.macOS(.v14)],
     products: [
         .library(name: "MirrorProtocol", targets: ["MirrorProtocol"]),
-        .executable(name: "quest-mirror-sender", targets: ["quest-mirror-sender"]),
-        .executable(name: "quest-mirror-viewer", targets: ["quest-mirror-viewer"]),
+        .executable(name: "vrscreen-sender", targets: ["vrscreen-sender"]),
+        .executable(name: "vrscreen-viewer", targets: ["vrscreen-viewer"]),
     ],
     targets: [
         .target(name: "MirrorProtocol"),
@@ -27,12 +27,12 @@ let package = Package(
         // to one serial DispatchQueue each, which Swift 6 strict concurrency cannot
         // express without pervasive @unchecked Sendable, so they build in Swift 5 mode.
         .executableTarget(
-            name: "quest-mirror-sender",
+            name: "vrscreen-sender",
             dependencies: ["MirrorProtocol"],
             swiftSettings: [.swiftLanguageMode(.v5)]
         ),
         .executableTarget(
-            name: "quest-mirror-viewer",
+            name: "vrscreen-viewer",
             dependencies: ["MirrorProtocol"],
             swiftSettings: [.swiftLanguageMode(.v5)]
         ),
@@ -44,7 +44,7 @@ let package = Package(
         // Sender-only logic (shortcut table, hotkey event handling, CLI spec parsing).
         .testTarget(
             name: "SenderTests",
-            dependencies: ["quest-mirror-sender", "MirrorProtocol"],
+            dependencies: ["vrscreen-sender", "MirrorProtocol"],
             swiftSettings: testSwiftSettings + [.swiftLanguageMode(.v5)]
         ),
     ]

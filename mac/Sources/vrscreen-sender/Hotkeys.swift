@@ -40,8 +40,8 @@ struct HotkeyBinding: Equatable {
 final class HotkeyController {
     static let repeatDelay: DispatchTimeInterval = .milliseconds(300)
     static let repeatInterval: DispatchTimeInterval = .milliseconds(80)
-    /// Hotkey IDs carry this signature ('QMIR') and the binding index.
-    static let signature: OSType = 0x514D_4952
+    /// Hotkey IDs carry this signature ('VRSC') and the binding index.
+    static let signature: OSType = 0x5652_5343
 
     private let bindings: [HotkeyBinding]
     private let onCommand: (HotkeyBinding, _ isRepeat: Bool) -> Void

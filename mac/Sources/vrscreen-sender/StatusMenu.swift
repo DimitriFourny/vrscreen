@@ -54,14 +54,14 @@ final class StatusMenu: NSObject, NSMenuDelegate {
 
     func install() {
         let item = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
-        if let image = NSImage(systemSymbolName: "visionpro", accessibilityDescription: "Quest Mirror")
-            ?? NSImage(systemSymbolName: "eyeglasses", accessibilityDescription: "Quest Mirror") {
+        if let image = NSImage(systemSymbolName: "visionpro", accessibilityDescription: "VRScreen")
+            ?? NSImage(systemSymbolName: "eyeglasses", accessibilityDescription: "VRScreen") {
             image.isTemplate = true
             item.button?.image = image
         } else {
             item.button?.title = "QM"
         }
-        item.button?.toolTip = "Quest Mirror"
+        item.button?.toolTip = "VRScreen"
 
         let menu = NSMenu()
         menu.autoenablesItems = false
@@ -104,7 +104,7 @@ final class StatusMenu: NSObject, NSMenuDelegate {
         menu.addItem(quickSettings)
         quickSettingsItem = quickSettings
         menu.addItem(.separator())
-        menu.addItem(actionItem("Quit Quest Mirror", #selector(quit)))
+        menu.addItem(actionItem("Quit VRScreen", #selector(quit)))
         menu.delegate = self
         item.menu = menu
         statusItem = item

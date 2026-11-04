@@ -12,7 +12,7 @@ do {
     exit(2)
 }
 
-let queue = DispatchQueue(label: "quest-mirror.viewer", qos: .userInteractive)
+let queue = DispatchQueue(label: "vrscreen.viewer", qos: .userInteractive)
 let discoverer = options.discover ? Discoverer(port: options.discoveryPort, queue: queue) : nil
 let client = ViewerClient(host: options.host, port: options.port, discoverer: discoverer, queue: queue)
 let decoder = VideoDecoder()

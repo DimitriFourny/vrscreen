@@ -1,5 +1,5 @@
-// Quest Mirror: native OpenXR app (NativeActivity + android_native_app_glue).
-// Mirrors the Mac's screen: TCP stream from quest-mirror-sender, decoded with MediaCodec straight
+// VRScreen: native OpenXR app (NativeActivity + android_native_app_glue).
+// Mirrors the Mac's screen: TCP stream from vrscreen-sender, decoded with MediaCodec straight
 // into a world-locked Android-surface quad over passthrough.
 
 #include "log.h"

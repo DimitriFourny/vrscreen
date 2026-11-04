@@ -1,7 +1,7 @@
 import Foundation
 import MirrorProtocol
 import Testing
-@testable import quest_mirror_sender
+@testable import vrscreen_sender
 
 @Test func throttleSendsAtMostOncePerIntervalAndAlwaysTheLastValue() {
     var t = ValueThrottle<Int>(interval: 1.0 / 30)
@@ -35,7 +35,7 @@ import Testing
 @Test func settingsPersistAndClamp() throws {
     let dir = FileManager.default.temporaryDirectory.appendingPathComponent("qm-settings-\(UUID().uuidString)")
     defer { try? FileManager.default.removeItem(at: dir) }
-    let store = DisplaySettingsStore(url: dir.appendingPathComponent("QuestMirror/settings.json"))
+    let store = DisplaySettingsStore(url: dir.appendingPathComponent("VRScreen/settings.json"))
     #expect(store.load() == .defaults) // missing file
     try store.save(DisplaySettings(curvature: 350, dim: 1000, handGestures: true))
     #expect(store.load() == DisplaySettings(curvature: 350, dim: 1000, handGestures: true))
@@ -59,5 +59,5 @@ import Testing
 @Test func menuStatusLine() {
     #expect(StatusMenu.statusText(forClientAddress: nil) == "No headset connected")
     #expect(StatusMenu.statusText(forClientAddress: "127.0.0.1:50123") == "Headset: USB (127.0.0.1)")
-    #expect(StatusMenu.statusText(forClientAddress: "192.168.1.35:41000") == "Headset: Wi-Fi 192.168.1.35")
+    #expect(StatusMenu.statusText(forClientAddress: "192.168.1.42:41000") == "Headset: Wi-Fi 192.168.1.42")
 }

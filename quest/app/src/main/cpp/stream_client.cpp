@@ -1,6 +1,7 @@
 #include "stream_client.h"
 
 #include "log.h"
+#include "wire.h"
 
 #include <arpa/inet.h>
 #include <fcntl.h>
@@ -38,8 +39,6 @@ constexpr uint32_t kMaxPayload = 64u << 20;
 constexpr size_t kHeaderSize = 5;
 constexpr int kDefaultPort = 7777;
 constexpr uint16_t kDiscoveryPort = 7778;
-constexpr uint8_t kDiscover = 0x01;
-constexpr uint8_t kAnnounce = 0x02;
 constexpr int64_t kStatsIntervalMicros = 1'000'000;
 constexpr int64_t kPingIntervalMicros = 500'000;
 constexpr int64_t kFastPingIntervalMicros = 100'000;
@@ -49,7 +48,7 @@ constexpr size_t kClockWindow = 16;
 constexpr int kRoundMillis = 1000;
 constexpr int kAnnounceWaitMillis = 500;
 
-uint16_t readU16(const uint8_t* p) { return static_cast<uint16_t>((p[0] << 8) | p[1]); }
+using wire::readU16;
 
 uint32_t readU32(const uint8_t* p) {
     return (uint32_t{p[0]} << 24) | (uint32_t{p[1]} << 16) | (uint32_t{p[2]} << 8) | uint32_t{p[3]};
@@ -103,7 +102,7 @@ std::string StreamClient::Endpoint::transport() const {
     switch (kind) {
         case Kind::Usb: return "USB (adb reverse)";
         case Kind::WiFi: return "Wi-Fi " + host + (name.empty() ? "" : " (" + name + ")");
-        case Kind::Override: return host + ":" + std::to_string(port) + " (debug.questmirror.host)";
+        case Kind::Override: return host + ":" + std::to_string(port) + " (debug.vrscreen.host)";
     }
     return host;
 }
@@ -155,8 +154,8 @@ void StreamClient::run() {
     std::string lastLogged;
     while (!stop_) {
         const int64_t roundStart = nowMicros();
-        const std::string hostProp = readProperty("debug.questmirror.host");
-        const std::string portProp = readProperty("debug.questmirror.port");
+        const std::string hostProp = readProperty("debug.vrscreen.host");
+        const std::string portProp = readProperty("debug.vrscreen.port");
         const int port = portProp.empty() ? kDefaultPort : std::atoi(portProp.c_str());
 
         Endpoint chosen;
@@ -320,7 +319,7 @@ int StreamClient::connectWithHello(const Endpoint& endpoint, int connectTimeoutM
         return -1;
     };
     // The hello: read exactly 6 bytes so everything after it stays for session().
-    uint8_t hello[6];
+    uint8_t hello[wire::kHelloSize];
     size_t got = 0;
     const int64_t deadline = nowMicros() + int64_t{helloTimeoutMs} * 1000;
     while (got < sizeof(hello)) {
@@ -337,8 +336,8 @@ int StreamClient::connectWithHello(const Endpoint& endpoint, int connectTimeoutM
         }
         got += static_cast<size_t>(n);
     }
-    if (std::memcmp(hello, "QMIR", 4) != 0) return fail("bad hello magic");
-    if (readU16(hello + 4) != 1) return fail("unsupported protocol version " + std::to_string(readU16(hello + 4)));
+    std::string helloError;
+    if (!wire::checkHello(hello, &helloError)) return fail(helloError);
     return fd;
 }
 
@@ -363,7 +362,7 @@ void StreamClient::openDiscoverySocket() {
 
 void StreamClient::sendDiscover() {
     if (discoveryFd_ < 0) return;
-    const uint8_t message[7] = {'Q', 'M', 'I', 'R', kDiscover, 0, 1};
+    const wire::DiscoverDatagram message = wire::discoverDatagram();
     // The limited broadcast plus each interface's directed broadcast (e.g. 192.168.1.255 on wlan0).
     std::vector<in_addr_t> targets = {htonl(INADDR_BROADCAST)};
     ifaddrs* interfaces = nullptr;
@@ -382,7 +381,7 @@ void StreamClient::sendDiscover() {
         to.sin_family = AF_INET;
         to.sin_port = htons(kDiscoveryPort);
         to.sin_addr.s_addr = target;
-        sendto(discoveryFd_, message, sizeof(message), 0, reinterpret_cast<sockaddr*>(&to), sizeof(to));
+        sendto(discoveryFd_, message.bytes, sizeof(message.bytes), 0, reinterpret_cast<sockaddr*>(&to), sizeof(to));
     }
 }
 
@@ -395,16 +394,15 @@ void StreamClient::collectAnnouncements(int timeoutMs, int tcpPortFallback) {
         socklen_t fromLen = sizeof(from);
         const ssize_t n =
             recvfrom(discoveryFd_, buffer, sizeof(buffer), 0, reinterpret_cast<sockaddr*>(&from), &fromLen);
-        if (n >= 10 && std::memcmp(buffer, "QMIR", 4) == 0 && buffer[4] == kAnnounce && readU16(buffer + 5) == 1) {
+        wire::Announce announce;
+        if (n > 0 && wire::parseAnnounce(buffer, static_cast<size_t>(n), &announce)) {
             Endpoint e;
             e.kind = Endpoint::Kind::WiFi;
             char ip[INET_ADDRSTRLEN] = {};
             inet_ntop(AF_INET, &from.sin_addr, ip, sizeof(ip));
             e.host = ip;
-            e.port = readU16(buffer + 7);
-            if (e.port == 0) e.port = tcpPortFallback;
-            const size_t nameLen = std::min<size_t>(buffer[9], static_cast<size_t>(n) - 10);
-            e.name.assign(reinterpret_cast<const char*>(buffer + 10), nameLen);
+            e.port = announce.port != 0 ? announce.port : tcpPortFallback;
+            e.name = std::move(announce.name);
             const bool known = std::any_of(announced_.begin(), announced_.end(), [&](const Endpoint& a) {
                 return a.host == e.host && a.port == e.port;
             });

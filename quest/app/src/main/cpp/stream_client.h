@@ -48,7 +48,7 @@ struct LinkStats {
 
 // Where the client looks for the sender, for the status panel.
 struct SearchState {
-    std::string overrideEndpoint;  // "host:port" from debug.questmirror.host, empty = automatic
+    std::string overrideEndpoint;  // "host:port" from debug.vrscreen.host, empty = automatic
     std::string usbResult;         // outcome of the last USB (127.0.0.1) attempt, empty = not tried
     std::string wifiResult;        // outcome of the last discovery / Wi-Fi attempt
     std::string lastDisconnect;    // why the previous connection ended, if any
@@ -59,7 +59,7 @@ class StreamListener {
 public:
     virtual ~StreamListener() = default;
     virtual void onSearching(const SearchState& state) = 0;
-    // `transport`: "USB (adb reverse)", "Wi-Fi 192.168.1.20 (name)" or "192.168.1.20:7777 (override)".
+    // `transport`: "USB (adb reverse)", "Wi-Fi 192.168.1.10 (name)" or "192.168.1.10:7777 (override)".
     virtual void onConnected(const std::string& transport) = 0;
     // Return false to drop the connection (the client reconnects).
     virtual bool onConfig(const StreamConfig& config) = 0;
@@ -76,7 +76,7 @@ public:
 // Client for the Mac sender.
 //
 // Connection policy (re-run after every disconnect, never switching mid-stream):
-// - debug.questmirror.host set: only that host (port from debug.questmirror.port, default 7777).
+// - debug.vrscreen.host set: only that host (port from debug.vrscreen.port, default 7777).
 // - Otherwise USB first: 127.0.0.1:port, which `adb reverse tcp:7777 tcp:7777` tunnels to the
 //   Mac (without a reverse it is refused at once; without a sender adbd closes it before the
 //   hello). Meanwhile UDP discovery (port 7778) runs; if USB gives no hello, the client connects

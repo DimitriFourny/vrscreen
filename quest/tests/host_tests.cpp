@@ -1,8 +1,10 @@
 // Host unit tests: hand-gesture state machine, pose filter, facing()/headingOf() near the zenith,
-// highlight geometry. No framework: each TEST registers a function; CHECK records failures.
+// highlight geometry, protocol hello/discovery framing. No framework: each TEST registers a
+// function; CHECK records failures.
 
 #include "grab.h"
 #include "hand_gestures.h"
+#include "wire.h"
 #include "xr_math.h"
 
 #include <cmath>
@@ -585,6 +587,47 @@ TEST(highlightCylinderSharesTheScreensRadius) {
     CHECK(gw.centralAngle > 2.8f && gw.centralAngle < 2.0f * kPi);
     // Absurd border: clamped to a full circle.
     CHECK_NEAR(highlightFrame(1.0f, 1.0f, 0.1f, 1.0f).centralAngle, 2.0 * kPi, 1e-5);
+}
+
+// ---- Protocol framing (wire.h) ----------------------------------------------------------------------
+
+TEST(helloNeedsTheVrscMagicAndVersion1) {
+    std::string error;
+    const uint8_t good[6] = {0x56, 0x52, 0x53, 0x43, 0x00, 0x01};  // "VRSC" v1
+    CHECK(wire::checkHello(good, &error));
+    const uint8_t otherMagic[6] = {'X', 'Y', 'Z', 'W', 0x00, 0x01};
+    CHECK(!wire::checkHello(otherMagic, &error) && error == "bad hello magic");
+    const uint8_t v2[6] = {'V', 'R', 'S', 'C', 0x00, 0x02};
+    CHECK(!wire::checkHello(v2, &error) && error == "unsupported protocol version 2");
+}
+
+TEST(discoverDatagramBytes) {
+    const wire::DiscoverDatagram d = wire::discoverDatagram();
+    const uint8_t expected[7] = {0x56, 0x52, 0x53, 0x43, 0x01, 0x00, 0x01};
+    CHECK(std::memcmp(d.bytes, expected, sizeof(expected)) == 0);
+}
+
+TEST(announceParsing) {
+    // "VRSC", ANNOUNCE, v1, port 7777, name "My Mac".
+    const uint8_t datagram[] = {0x56, 0x52, 0x53, 0x43, 0x02, 0x00, 0x01, 0x1E, 0x61, 6, 'M', 'y', ' ', 'M', 'a', 'c'};
+    wire::Announce a;
+    CHECK(wire::parseAnnounce(datagram, sizeof(datagram), &a));
+    CHECK(a.port == 7777);
+    CHECK(a.name == "My Mac");
+    // A name length past the end is cut to what arrived.
+    CHECK(wire::parseAnnounce(datagram, 13, &a) && a.name == "My ");
+    // Another magic, a DISCOVER, another version or a short datagram: ignored.
+    uint8_t other[sizeof(datagram)];
+    std::memcpy(other, datagram, sizeof(datagram));
+    other[0] = 'X';
+    CHECK(!wire::parseAnnounce(other, sizeof(other), &a));
+    std::memcpy(other, datagram, sizeof(datagram));
+    other[4] = wire::kDiscover;
+    CHECK(!wire::parseAnnounce(other, sizeof(other), &a));
+    other[4] = wire::kAnnounce;
+    other[6] = 2;
+    CHECK(!wire::parseAnnounce(other, sizeof(other), &a));
+    CHECK(!wire::parseAnnounce(datagram, 9, &a));
 }
 
 }  // namespace

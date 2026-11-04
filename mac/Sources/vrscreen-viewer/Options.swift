@@ -12,7 +12,7 @@ struct ViewerOptions {
     var durationSeconds: Double?
 
     static let usage = """
-    Usage: quest-mirror-viewer [options]
+    Usage: vrscreen-viewer [options]
 
       --host HOST              Sender address (default 127.0.0.1).
       --port N                 Sender port (default 7777).

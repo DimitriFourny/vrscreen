@@ -1,7 +1,7 @@
 import AppKit
 import MirrorProtocol
 import Testing
-@testable import quest_mirror_sender
+@testable import vrscreen_sender
 
 @Test func gestureModeRequiresExactModifiers() {
     #expect(MouseGestureMode.from([.control, .option, .command]) == .orbitAndDistance)

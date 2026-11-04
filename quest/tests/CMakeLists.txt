@@ -4,7 +4,7 @@
 #
 #   cmake -S tests -B build/host-tests && cmake --build build/host-tests && ctest --test-dir build/host-tests --output-on-failure
 cmake_minimum_required(VERSION 3.22)
-project(questmirror_host_tests LANGUAGES CXX)
+project(vrscreen_host_tests LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)

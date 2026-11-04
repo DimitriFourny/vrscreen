@@ -14,5 +14,5 @@ dependencyResolutionManagement {
     }
 }
 
-rootProject.name = "QuestMirror"
+rootProject.name = "VRScreen"
 include(":app")

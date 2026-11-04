@@ -3,7 +3,7 @@
 #
 #   scripts/mirror.sh [options] [sender options...] [-- sender options...]
 #
-# Always runs quest-mirror-sender with LAN discovery, so the headset can find the Mac
+# Always runs vrscreen-sender with LAN discovery, so the headset can find the Mac
 # over Wi-Fi. If the headset is attached over USB it also sets up `adb reverse` (the
 # app tries that first) and launches the app. Ctrl-C stops the sender and removes the
 # adb reverse this script created.
@@ -16,7 +16,7 @@ Usage: scripts/mirror.sh [options] [sender options...] [-- sender options...]
 Options:
   --port N            TCP port (default 7777). Over USB the same port is used on the
                       headset; for a non-default port the app is told via the
-                      debug.questmirror.port property on launch.
+                      debug.vrscreen.port property on launch.
   --discovery-port N  UDP port answering LAN discovery (default 7778).
   --serial S          adb serial of the headset (default: $ANDROID_SERIAL or the only device).
   --install           Build the Quest app (quest/gradlew assembleDebug) and install it
@@ -25,15 +25,15 @@ Options:
   --wifi-only         Do not use adb at all; the headset connects over Wi-Fi.
   -h, --help          Show this help.
 
-Any other arguments are passed to quest-mirror-sender, e.g.
+Any other arguments are passed to vrscreen-sender, e.g.
   scripts/mirror.sh --codec h264 --bitrate 40
   scripts/mirror.sh --wifi-only -- --source test
 EOF
 }
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-SENDER="$ROOT/mac/.build/release/quest-mirror-sender"
-APP_ID="com.df0.questmirror"
+SENDER="$ROOT/mac/.build/release/vrscreen-sender"
+APP_ID="com.df0.vrscreen"
 ACTIVITY="$APP_ID/android.app.NativeActivity"
 APK="$ROOT/quest/app/build/outputs/apk/debug/app-debug.apk"
 DEFAULT_PORT=7777
@@ -92,8 +92,8 @@ fi
 
 # 2. Sender binary, rebuilt when any Mac source is newer.
 if [[ ! -x "$SENDER" ]] || [[ -n "$(find "$ROOT/mac/Sources" "$ROOT/mac/Package.swift" -newer "$SENDER" -print -quit)" ]]; then
-    say "Building quest-mirror-sender (release)"
-    swift build -c release --package-path "$ROOT/mac" --product quest-mirror-sender
+    say "Building vrscreen-sender (release)"
+    swift build -c release --package-path "$ROOT/mac" --product vrscreen-sender
 fi
 
 # 3. USB: install, adb reverse (removed on exit unless it existed before), launch.
@@ -134,9 +134,9 @@ if (( USB )); then
     fi
     if (( LAUNCH )); then
         if (( PORT != DEFAULT_PORT )); then
-            adb shell setprop debug.questmirror.port "$PORT"
-        elif [[ -n "$(adb shell getprop debug.questmirror.port | tr -d '\r')" ]]; then
-            adb shell setprop debug.questmirror.port "''"
+            adb shell setprop debug.vrscreen.port "$PORT"
+        elif [[ -n "$(adb shell getprop debug.vrscreen.port | tr -d '\r')" ]]; then
+            adb shell setprop debug.vrscreen.port "''"
         fi
         say "Launching $ACTIVITY"
         adb shell am start -n "$ACTIVITY" >/dev/null
@@ -167,10 +167,10 @@ fi
 if (( discovery )); then
     say "Over Wi-Fi it finds this Mac by UDP discovery on port $DISCOVERY_PORT and connects to ${addresses:-<no IPv4 address>} port $PORT"
 else
-    say "Discovery is off: over Wi-Fi the app needs debug.questmirror.host set to one of ${addresses:-<no IPv4 address>}"
+    say "Discovery is off: over Wi-Fi the app needs debug.vrscreen.host set to one of ${addresses:-<no IPv4 address>}"
 fi
 if (( !USB )) && (( LAUNCH )); then
-    say "Start Quest Mirror on the headset (same Wi-Fi network as this Mac)"
+    say "Start VRScreen on the headset (same Wi-Fi network as this Mac)"
 fi
 if (( hotkeys )); then
     say "Place the screen from any app: ⌃⌥⌘ arrows slide it, ⌃⌥⌘⇧ ↑/↓ farther/closer, ⌃⌥⌘⇧ →/← bigger/smaller, ⌃⌥⌘R recenter, ⌃⌥⌘0 reset"
@@ -184,7 +184,7 @@ fi
 
 # 5. Sender in the foreground. Ctrl-C reaches it directly; it shuts down cleanly and
 # the EXIT trap removes the reverse.
-say "Starting quest-mirror-sender on TCP $PORT (Ctrl-C to stop)"
+say "Starting vrscreen-sender on TCP $PORT (Ctrl-C to stop)"
 status=0
 "$SENDER" --port "$PORT" --discovery-port "$DISCOVERY_PORT" ${SENDER_EXTRA[@]+"${SENDER_EXTRA[@]}"} \
     ${SENDER_ARGS[@]+"${SENDER_ARGS[@]}"} || status=$?

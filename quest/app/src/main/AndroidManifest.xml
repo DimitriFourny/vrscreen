@@ -36,7 +36,7 @@
             android:screenOrientation="landscape"
             android:theme="@android:style/Theme.Black.NoTitleBar.Fullscreen">
 
-            <meta-data android:name="android.app.lib_name" android:value="questmirror" />
+            <meta-data android:name="android.app.lib_name" android:value="vrscreen" />
 
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />

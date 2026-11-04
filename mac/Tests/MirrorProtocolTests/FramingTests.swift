@@ -40,7 +40,7 @@ private func parse(_ data: Data, chunkSizes: [Int]) throws -> [Message] {
 }
 
 @Test func helloAndHeaderLayout() {
-    #expect(WireProtocol.helloBytes() == Data([0x51, 0x4D, 0x49, 0x52, 0x00, 0x01]))
+    #expect(WireProtocol.helloBytes() == Data([0x56, 0x52, 0x53, 0x43, 0x00, 0x01]))
     let ping = Message.ping(clientTimeMicros: 0x0A0B_0C0D_0E0F_1011).encoded()
     #expect(ping == Data([0x10, 0, 0, 0, 8, 0x0A, 0x0B, 0x0C, 0x0D, 0x0E, 0x0F, 0x10, 0x11]))
     let frame = Message.frame(FrameMessage(isKeyframe: true, captureTimeMicros: 2, accessUnit: Data([9]))).encoded()
@@ -76,7 +76,7 @@ func roundTripWithSplitReads(chunkSizes: [Int]) throws {
     #expect(throws: ProtocolError.badMagic(Array("QMIX".utf8))) { try badMagic.next() }
 
     var badVersion = MessageReader(expectHello: true)
-    badVersion.append(Data("QMIR".utf8) + Data([0, 2]))
+    badVersion.append(Data("VRSC".utf8) + Data([0, 2]))
     #expect(throws: ProtocolError.unsupportedVersion(2)) { try badVersion.next() }
 }
 

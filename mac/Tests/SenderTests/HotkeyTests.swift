@@ -2,7 +2,7 @@ import Carbon.HIToolbox
 import Foundation
 import MirrorProtocol
 import Testing
-@testable import quest_mirror_sender
+@testable import vrscreen_sender
 
 private let base = UInt32(controlKey | optionKey | cmdKey)
 private let shifted = base | UInt32(shiftKey)

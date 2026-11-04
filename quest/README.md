@@ -1,7 +1,7 @@
-# Quest Mirror — Quest 3 app
+# VRScreen — Quest 3 app
 
 Native C++/OpenXR app (no Java code, `android.app.NativeActivity`) that shows the Mac's screen as
-a world-locked quad over full passthrough. It connects to `quest-mirror-sender` (see `../mac`,
+a world-locked quad over full passthrough. It connects to `vrscreen-sender` (see `../mac`,
 protocol in `../docs/protocol.md`) and decodes the HEVC/H.264 stream with MediaCodec straight into
 the quad's `XR_KHR_android_surface_swapchain` Surface — no copies, no GL rendering.
 
@@ -21,8 +21,9 @@ export ANDROID_HOME=$HOME/Library/Android/sdk   # or put sdk.dir in local.proper
 The OpenXR loader and headers come from Maven (`org.khronos.openxr:openxr_loader_for_android`,
 prefab); no Meta SDK is used.
 
-Host unit tests (gesture state machine, `facing()` near the zenith, highlight geometry; plain
-CMake + the host compiler, using the OpenXR headers Gradle extracted, so build the APK once first):
+Host unit tests (gesture state machine, `facing()` near the zenith, highlight geometry, hello and
+discovery framing; plain CMake + the host compiler, using the OpenXR headers Gradle extracted, so
+build the APK once first):
 
 ```sh
 cmake -S tests -B build/host-tests && cmake --build build/host-tests && ctest --test-dir build/host-tests --output-on-failure
@@ -33,14 +34,14 @@ cmake -S tests -B build/host-tests && cmake --build build/host-tests && ctest --
 ```sh
 adb install -r app/build/outputs/apk/debug/app-debug.apk
 ../scripts/mirror.sh                              # on the Mac: the sender (see ../mac/README.md)
-adb shell am start -n com.df0.questmirror/android.app.NativeActivity
-adb shell am force-stop com.df0.questmirror       # stop
+adb shell am start -n com.df0.vrscreen/android.app.NativeActivity
+adb shell am force-stop com.df0.vrscreen       # stop
 ```
 
-It also appears in the headset library as "Quest Mirror" (Unknown Sources). Start order does not
+It also appears in the headset library as "VRScreen" (Unknown Sources). Start order does not
 matter: the app keeps looking and shows what it is doing on a panel in front of you ("Looking for
-the Mac over USB and Wi-Fi ...", what each transport answered, "Connected over Wi-Fi 192.168.1.20
-(Mac name)", "... waiting for a picture").
+the Mac over USB and Wi-Fi ...", what each transport answered, "Connected over Wi-Fi 192.168.1.10
+(My Mac)", "... waiting for a picture").
 
 ### USB or Wi-Fi
 
@@ -61,28 +62,28 @@ received for 3 s although the app pings every 500 ms) also counts as a disconnec
 To pin a sender (only that one is tried; must be an IP address):
 
 ```sh
-adb shell setprop debug.questmirror.host 192.168.1.20
-adb shell setprop debug.questmirror.port 7777            # optional, default 7777
-adb shell setprop debug.questmirror.host "''"            # back to automatic
+adb shell setprop debug.vrscreen.host 192.168.1.10
+adb shell setprop debug.vrscreen.port 7777            # optional, default 7777
+adb shell setprop debug.vrscreen.host "''"            # back to automatic
 ```
 
 ## Logs
 
-Everything the app logs uses the tag `QuestMirror`:
+Everything the app logs uses the tag `VRScreen`:
 
 ```sh
-adb logcat -s QuestMirror           # follow
+adb logcat -s VRScreen              # follow
 adb logcat -d -b crash              # native crashes
 ```
 
 Besides session/lifecycle transitions it logs `No sender yet (USB: ... | Wi-Fi: ...)` when that
-changes, `Connected over Wi-Fi 192.168.1.20 (name)`, every `CONFIG`, the decoder
+changes, `Connected over Wi-Fi 192.168.1.10 (My Mac)`, every `CONFIG`, the decoder
 (`Decoder c2.qti.hevc.decoder configured ...`), Surface resizes, status changes, and once per second:
 
 ```
 Stats: recv 59.9 fps, decoded 59.9 fps, 0.81 Mbit/s, capture->decoded avg 13.5 ms max 86.2 ms,
        decode avg 3.6 ms max 5.9 ms, rtt 5.19 ms, in decoder 1, c2.qti.hevc.decoder 1920x1080,
-       Wi-Fi 192.168.1.20 (Mac mini)
+       Wi-Fi 192.168.1.10 (My Mac)
 ```
 
 - *capture->decoded*: Mac capture time to the decoded picture being handed to the compositor, via
@@ -192,7 +193,7 @@ flat and the surroundings normal):
   about half as bright. The compositor fades in linear light, so the passthrough layer's opacity
   is (1 − dim)^1.9: on the headset, exponent 1.8 gave 76/54/30 % brightness at 250/500/750 and
   2.0 gave 71/46/20 %, so 1.9 should land near 75/50/25 % (`dim_controller.h`; tune with
-  `debug.questmirror.dimgamma`). No edge rendering, and the screen itself is never dimmed.
+  `debug.vrscreen.dimgamma`). No edge rendering, and the screen itself is never dimmed.
   For safety the room is only dimmed while the screen shows a picture: when the stream goes away
   (searching, connecting, waiting for the first frame, decoder restart) the dim is kept for 1.5 s,
   so a quick reconnect does not flash, then fades out over 0.3 s; it fades back in over 0.3 s
@@ -230,15 +231,15 @@ Default: 1.8 m wide at 1.2 m, at eye height.
 Debug equivalents over adb (polled about twice a second; handy with the headset on the desk):
 
 ```sh
-adb shell setprop debug.questmirror.recenter $RANDOM   # any new value recenters
-adb shell setprop debug.questmirror.distance 1.5       # metres (saved like the thumbstick)
-adb shell setprop debug.questmirror.width 2.0          # metres (saved like the thumbstick)
-adb shell "setprop debug.questmirror.simgrab '0.3 0.2 0 45'"  # simulated grab: the grabber starts
-                                                       # at the head, moves by (x, y, z) m, turns 45° left
-adb shell "setprop debug.questmirror.simpinch '1 6 0 0.2 0'"  # simulated pinch (see below)
-adb shell setprop debug.questmirror.filter 1           # compositor filter mode (default 0 = none)
-adb shell setprop debug.questmirror.lowlatency 0       # A/B: decoder without low-latency keys
-adb shell setprop debug.questmirror.filter "''"        # clear any of these
+adb shell setprop debug.vrscreen.recenter $RANDOM   # any new value recenters
+adb shell setprop debug.vrscreen.distance 1.5       # metres (saved like the thumbstick)
+adb shell setprop debug.vrscreen.width 2.0          # metres (saved like the thumbstick)
+adb shell "setprop debug.vrscreen.simgrab '0.3 0.2 0 45'"  # simulated grab: the grabber starts
+                                                     # at the head, moves by (x, y, z) m, turns 45° left
+adb shell "setprop debug.vrscreen.simpinch '1 6 0 0.2 0'"  # simulated pinch (see below)
+adb shell setprop debug.vrscreen.filter 1           # compositor filter mode (default 0 = none)
+adb shell setprop debug.vrscreen.lowlatency 0       # A/B: decoder without low-latency keys
+adb shell setprop debug.vrscreen.filter "''"        # clear any of these
 ```
 
 `simpinch` runs a scripted pinch through the hand-gesture state machine instead of tracked hands
@@ -297,6 +298,8 @@ compared with none. Mode 0 submits the quad without any layer-settings struct.
   check, CONFIG validation (1..8192, even), message parsing (unknown types skipped), PING every
   500 ms (5 fast ones after connect, offset from the lowest-RTT of the last 16), `FRAME_ACK` after
   every batch of consumed frames, `CONTROL` → `ScreenCommand`, dead-link timeout.
+- `wire.h` — socket-free protocol framing: the `VRSC` magic, hello check, DISCOVER datagram and
+  ANNOUNCE parsing (host-tested).
 - `video_decoder.{h,cpp}` — AMediaCodec into the ANativeWindow; `low-latency=1`,
   `vendor.qti-ext-dec-low-latency.enable=1`, `priority=0`; prefers
   `c2.qti.avc.decoder.low_latency` for H.264 and falls back to the default decoder if it rejects

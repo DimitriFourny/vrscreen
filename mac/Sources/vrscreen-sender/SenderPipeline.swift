@@ -21,7 +21,7 @@ final class SenderPipeline {
     let server: MirrorServer
     /// Owned by `encoderQueue`; never touched from `queue`.
     private let encoder: VideoEncoder
-    private let encoderQueue = DispatchQueue(label: "quest-mirror.encoder", qos: .userInteractive)
+    private let encoderQueue = DispatchQueue(label: "vrscreen.encoder", qos: .userInteractive)
 
     private struct Capture {
         var buffer: CVPixelBuffer

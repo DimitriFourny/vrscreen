@@ -1,10 +1,11 @@
-# Quest Mirror — Mac side
+# VRScreen — Mac side
 
-Mirrors the Mac's display to a Quest 3 (view-only). This package contains:
+VRScreen — Mac screen mirroring for Meta Quest. This package is the Mac side: it
+mirrors the Mac's display to a Quest 3 (view-only) and contains:
 
-- `quest-mirror-sender`: captures a display with ScreenCaptureKit, encodes it with
+- `vrscreen-sender`: captures a display with ScreenCaptureKit, encodes it with
   VideoToolbox (HEVC or H.264, hardware, low latency) and serves it over TCP.
-- `quest-mirror-viewer`: a Mac test client (window or headless) that speaks the same
+- `vrscreen-viewer`: a Mac test client (window or headless) that speaks the same
   protocol as the Quest app.
 - `MirrorProtocol`: the shared protocol library (framing, message types,
   Annex-B/AVCC and parameter-set helpers).
@@ -34,16 +35,16 @@ in that setup (and only then).
 
 ```sh
 # Sender: capture the main display (needs Screen Recording permission, see below)
-.build/release/quest-mirror-sender
+.build/release/vrscreen-sender
 
 # Sender with the synthetic test pattern (no permission needed)
-.build/release/quest-mirror-sender --source test
+.build/release/vrscreen-sender --source test
 
 # Viewer in a window
-.build/release/quest-mirror-viewer
+.build/release/vrscreen-viewer
 
 # Viewer headless: stats only, one PNG snapshot, then exit
-.build/release/quest-mirror-viewer --headless --snapshot /tmp/mirror.png --exit-after-snapshot
+.build/release/vrscreen-viewer --headless --snapshot /tmp/mirror.png --exit-after-snapshot
 ```
 
 Stop either with Ctrl-C.
@@ -111,7 +112,7 @@ follows light/dark mode; "QM" if the symbol is missing). Its menu has:
   and use two hands to resize it; while off, the headset ignores hand input entirely;
 - **Re-center** and **Reset placement** (like ⌃⌥⌘R / ⌃⌥⌘0);
 - **Travel mode: On / Off** and **Open Quick Settings in headset…** (USB only, see below);
-- **Quit Quest Mirror**: the same clean shutdown as Ctrl-C (cursor released; when
+- **Quit VRScreen**: the same clean shutdown as Ctrl-C (cursor released; when
   started by `scripts/mirror.sh`, the script then removes its adb reverse).
 
 **Travel mode** (for using the headset in a moving vehicle) can't be switched from
@@ -133,7 +134,7 @@ items show "headset not on USB".
 The sliders update the headset while you drag (at most 30 messages per second, the
 final value always sent); the checkbox applies at once. The sender owns these three
 settings: it sends them to every headset that connects and stores them in
-`~/Library/Application Support/QuestMirror/settings.json` (`{"curvature": 0-1000,
+`~/Library/Application Support/VRScreen/settings.json` (`{"curvature": 0-1000,
 "dim": 0-1000, "handGestures": true|false}`, permille; written half a second after the
 last change, read at startup; defaults 0, 0 and off; a key missing from an older file
 takes its default). The stored values are sent to clients even with `--no-menu`.
@@ -165,7 +166,7 @@ behind dead keys or on other keys. They use Carbon `RegisterEventHotKey`, which 
 no Accessibility or Input Monitoring permission. Registration is exclusive: if another
 app (or a second sender) already owns a combination, the sender logs
 `hotkeys: could not register ⌃⌥⌘← (taken by another app)` at startup and keeps running
-without it. Every press is logged, e.g. `hotkey ⌃⌥⌘→ → TRANSLATE dx=+1 dy=0 → 192.168.1.35:51234`.
+without it. Every press is logged, e.g. `hotkey ⌃⌥⌘→ → TRANSLATE dx=+1 dy=0 → 192.168.1.42:51234`.
 
 **Mouse and scroll.** Orbit uses the mouse's movement deltas, not the cursor position,
 and only while exactly ⌃⌥⌘ is held (with ⇧, the mouse does nothing and scroll resizes).
@@ -223,7 +224,7 @@ The script:
 - sets `ADB_MDNS=0` (adb 37.0.1's mDNS backend crashes the adb server);
 - if exactly one authorized headset is attached over USB (`--serial` to choose), sets up
   `adb reverse tcp:7777 tcp:7777` (`--port` to change; the app is then told via the
-  `debug.questmirror.port` property) and launches the app unless `--no-launch`;
+  `debug.vrscreen.port` property) and launches the app unless `--no-launch`;
   without a usable USB headset it carries on for Wi-Fi;
 - always runs the sender with LAN discovery (UDP 7778, `--discovery-port`) and prints
   how the headset will connect (USB tunnel first, else Wi-Fi to the Mac's addresses);
@@ -234,13 +235,13 @@ By hand, USB is:
 
 ```sh
 adb reverse tcp:7777 tcp:7777
-.build/release/quest-mirror-sender
+.build/release/vrscreen-sender
 ```
 
 The Quest app tries `127.0.0.1:7777` first (the adb tunnel); re-run `adb reverse` after
 reconnecting the headset or restarting adb. Over Wi-Fi it broadcasts DISCOVER on UDP
 7778 and connects to the first Mac that answers; the sender answers by default. Test it
-Mac-only with `quest-mirror-viewer --discover`.
+Mac-only with `vrscreen-viewer --discover`.
 
 Measured on a 5 GHz network to a Quest 3: ping RTT avg 11 ms at 5 pings/s (36 ms at
 1/s, with spikes over 100 ms, likely Wi-Fi power saving), TCP about 285 Mbit/s, versus

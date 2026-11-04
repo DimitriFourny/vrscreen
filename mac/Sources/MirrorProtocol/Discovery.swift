@@ -2,7 +2,7 @@ import Foundation
 
 /// LAN discovery datagrams (UDP, docs/protocol.md "Discovery").
 ///
-/// `"QMIR" | type u8 | version u16 | payload`. Clients broadcast DISCOVER; senders
+/// `"VRSC" | type u8 | version u16 | payload`. Clients broadcast DISCOVER; senders
 /// answer each one with a unicast ANNOUNCE. Trailing bytes are ignored.
 public enum DiscoveryMessage: Equatable, Sendable {
     public static let defaultPort: UInt16 = 7778

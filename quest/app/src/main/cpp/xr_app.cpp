@@ -29,7 +29,7 @@ namespace {
         }                                                                    \
     } while (0)
 
-// Quad filtering via XR_FB_composition_layer_settings, selected with debug.questmirror.filter.
+// Quad filtering via XR_FB_composition_layer_settings, selected with debug.vrscreen.filter.
 struct FilterMode {
     const char* name;
     XrCompositionLayerSettingsFlagsFB flags;
@@ -55,17 +55,17 @@ constexpr int32_t kAutoFilterMode = 6;
 // region only) and normal sharpening (1) degrades text. Mode 0 chains no settings struct at all.
 constexpr int32_t kDefaultFilterMode = 0;
 
-constexpr const char* kFilterProperty = "debug.questmirror.filter";
-constexpr const char* kRecenterProperty = "debug.questmirror.recenter";
-constexpr const char* kDistanceProperty = "debug.questmirror.distance";
-constexpr const char* kWidthProperty = "debug.questmirror.width";
+constexpr const char* kFilterProperty = "debug.vrscreen.filter";
+constexpr const char* kRecenterProperty = "debug.vrscreen.recenter";
+constexpr const char* kDistanceProperty = "debug.vrscreen.distance";
+constexpr const char* kWidthProperty = "debug.vrscreen.width";
 // "dx dy dz [yawDegrees]": simulate a grab that starts at the head pose and moves the grabber by
 // (dx, dy, dz) metres in LOCAL space, turned by yaw, then releases (exercises Grab without buttons).
-constexpr const char* kSimGrabProperty = "debug.questmirror.simgrab";
+constexpr const char* kSimGrabProperty = "debug.vrscreen.simgrab";
 // "hands seconds [dx dy dz [spread [pitchDegrees]]]": a scripted pinch fed through HandGestures
 // (see startSimulatedPinch); exercises the gesture state machine and the highlight without hands.
-constexpr const char* kSimPinchProperty = "debug.questmirror.simpinch";
-constexpr const char* kDimGammaProperty = "debug.questmirror.dimgamma";  // tuning: opacity = (1 - dim)^gamma
+constexpr const char* kSimPinchProperty = "debug.vrscreen.simpinch";
+constexpr const char* kDimGammaProperty = "debug.vrscreen.dimgamma";  // tuning: opacity = (1 - dim)^gamma
 
 // Initial screen Surface size; the stream's CONFIG resizes it.
 constexpr int32_t kInitialSurfaceWidth = 1920;
@@ -239,7 +239,7 @@ bool XrApp::createInstance() {
 
     XrInstanceCreateInfo createInfo{XR_TYPE_INSTANCE_CREATE_INFO};
     createInfo.next = &androidInfo;
-    std::strncpy(createInfo.applicationInfo.applicationName, "QuestMirror", XR_MAX_APPLICATION_NAME_SIZE - 1);
+    std::strncpy(createInfo.applicationInfo.applicationName, "VRScreen", XR_MAX_APPLICATION_NAME_SIZE - 1);
     createInfo.applicationInfo.applicationVersion = 1;
     std::strncpy(createInfo.applicationInfo.engineName, "none", XR_MAX_ENGINE_NAME_SIZE - 1);
     createInfo.applicationInfo.apiVersion = XR_API_VERSION_1_0;

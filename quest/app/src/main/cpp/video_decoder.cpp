@@ -18,10 +18,10 @@ namespace {
 
 constexpr const char* kVendorLowLatency = "vendor.qti-ext-dec-low-latency.enable";
 
-// Low-latency decoding is on unless debug.questmirror.lowlatency is "0" (for A/B measurements).
+// Low-latency decoding is on unless debug.vrscreen.lowlatency is "0" (for A/B measurements).
 int32_t lowLatencySetting() {
     char value[PROP_VALUE_MAX] = {};
-    __system_property_get("debug.questmirror.lowlatency", value);
+    __system_property_get("debug.vrscreen.lowlatency", value);
     return std::strcmp(value, "0") == 0 ? 0 : 1;
 }
 
