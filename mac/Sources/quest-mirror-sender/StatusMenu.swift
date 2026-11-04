@@ -240,7 +240,15 @@ private final class SliderRow: NSView {
     private let valueLabel = NSTextField(labelWithString: "")
 
     init(title: String, percent: Double, target: AnyObject, action: Selector) {
-        slider = NSSlider(value: percent, minValue: 0, maxValue: 100, target: target, action: action)
+        slider = NSSlider()
+        // Menus are never key windows, so the stock cell leaves the track unfilled except on the
+        // slider being dragged; this cell always draws the filled part.
+        slider.cell = FilledSliderCell()
+        slider.minValue = 0
+        slider.maxValue = 100
+        slider.doubleValue = percent
+        slider.target = target
+        slider.action = action
         super.init(frame: NSRect(x: 0, y: 0, width: 260, height: 46))
         slider.isContinuous = true
         let titleLabel = NSTextField(labelWithString: title)
@@ -269,5 +277,19 @@ private final class SliderRow: NSView {
 
     func showValue() {
         valueLabel.stringValue = "\(Int(slider.doubleValue.rounded())) %"
+    }
+}
+
+/// Slider track with the part left of the knob always drawn in the accent colour.
+private final class FilledSliderCell: NSSliderCell {
+    override func drawBar(inside rect: NSRect, flipped: Bool) {
+        let height: CGFloat = 4
+        let bar = NSRect(x: rect.minX, y: rect.midY - height / 2, width: rect.width, height: height)
+        NSColor.tertiaryLabelColor.setFill()
+        NSBezierPath(roundedRect: bar, xRadius: height / 2, yRadius: height / 2).fill()
+        var filled = bar
+        filled.size.width = max(0, knobRect(flipped: flipped).midX - bar.minX)
+        NSColor.controlAccentColor.setFill()
+        NSBezierPath(roundedRect: filled, xRadius: height / 2, yRadius: height / 2).fill()
     }
 }
