@@ -53,7 +53,7 @@ public:
 
     // ScreenHost
     void requestSurfaceSize(int32_t width, int32_t height) override;
-    void placementCommand(const PlacementCommand& command) override;
+    void screenCommand(const ScreenCommand& command) override;
 
 private:
     struct SurfaceSwapchain {
@@ -94,7 +94,9 @@ private:
     // Screen in front of `head` (yaw only) at the current distance and height offset.
     void placeInFront(const XrPosef& head);
     void updateQuadPose();
-    void applyPlacementCommands();
+    void applyScreenCommands();
+    // Applies a SET_DIM value (0..1) to the passthrough layer's style.
+    void setPassthroughDim(float dim);
     void setPlacement(float distance, float width, const char* reason);
     void loadPlacement();
     void savePlacement();
@@ -160,7 +162,13 @@ private:
     int32_t requestedWidth_ = 0;  // guarded by resizeMutex_
     int32_t requestedHeight_ = 0;
     std::mutex commandMutex_;
-    std::vector<PlacementCommand> commands_;  // from the Mac (network thread), guarded by commandMutex_
+    std::vector<ScreenCommand> commands_;  // from the Mac (network thread), guarded by commandMutex_
+
+    // Presentation, set by the Mac (re-sent on every connect, never persisted here).
+    bool hasCylinder_ = false;  // XR_KHR_composition_layer_cylinder enabled
+    float curvature_ = 0.0f;    // 0 flat .. 1 cylinder centred on the viewer
+    float dim_ = 0.0f;          // 0 normal .. 1 black passthrough
+    PFN_xrPassthroughLayerSetStyleFB pfnPassthroughLayerSetStyleFB = nullptr;
 
     // Placement
     Placement placement_;
@@ -194,7 +202,7 @@ private:
     std::string lastSimGrabProp_;
     uint32_t controlBurstCount_ = 0;  // continuous Mac CONTROL commands since the last save
     XrPosef controlBurstStart_{{0, 0, 0, 1}, {0, 0, 0}};
-    PlacementCommand::Kind controlBurstKind_ = PlacementCommand::Kind::Orbit;
+    ScreenCommand::Kind controlBurstKind_ = ScreenCommand::Kind::Orbit;
     const char* controlBurstName_ = "";
 };
 

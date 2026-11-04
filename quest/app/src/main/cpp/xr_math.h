@@ -59,4 +59,26 @@ inline XrVector3f orbit(const XrVector3f& position, const XrVector3f& pivot, flo
                               -std::cos(azimuth) * std::cos(elevation)} * distance;
 }
 
+// XR_KHR_composition_layer_cylinder geometry for a curved screen whose centre and facing are those
+// of the flat quad `screen` (+Z towards the viewer). The radius is viewDistance / curvature (so
+// curvature 1 centres the cylinder on the viewer) and the arc length is `width`; if that arc would
+// exceed maxAngle the radius grows instead. The cylinder's pose is its axis point, from which the
+// arc's centre lies along -Z: the screen centre moved back by the radius towards the viewer.
+struct CylinderGeometry {
+    XrPosef pose;
+    float radius;
+    float centralAngle;
+};
+
+inline CylinderGeometry cylinderFor(const XrPosef& screen, float width, float viewDistance, float curvature,
+                                    float maxAngle) {
+    float radius = viewDistance / curvature;
+    float angle = width / radius;
+    if (angle > maxAngle) {
+        angle = maxAngle;
+        radius = width / maxAngle;
+    }
+    return {{screen.orientation, screen.position + rotate(screen.orientation, {0.0f, 0.0f, radius})}, radius, angle};
+}
+
 }  // namespace qm

@@ -126,6 +126,18 @@ From the Mac (sender shortcuts, sent as protocol `CONTROL` messages; see `../mac
 Mouse and scroll arrive as a stream of small deltas (up to 60 per second); each is applied on the
 next frame.
 
+From the Mac menu-bar icon (protocol `SET_CURVATURE` / `SET_DIM`, absolute values the Mac re-sends
+on every connect; the headset does not store them, so until the first one arrives the screen is
+flat and the surroundings normal):
+
+- **Curvature** 0–1000 ‰. 0 is the flat screen. Above 0 the screen becomes a section of a cylinder
+  (`XR_KHR_composition_layer_cylinder`) of radius = viewing distance ÷ (curvature/1000), so 1000
+  curves it around your eyes. Its centre, width (= arc length), facing and all the placement
+  controls stay the same; the arc is capped at 2.8 rad (160°), beyond which the radius grows. The
+  status panel stays flat. If the runtime lacked the extension the screen would stay flat (logged).
+- **Dim** 0–1000 ‰ darkens the passthrough surroundings towards black (passthrough layer opacity =
+  1 − dim, no edge rendering); the screen itself is never dimmed.
+
 Orientation: grabbing, orbiting, recenter and reset turn the screen towards your head (yaw, and
 pitch when it sits above or below eye height); it never rolls, so it stays upright. Sliding and
 distance/size changes keep the orientation it has. While grabbed it turns towards your current
@@ -180,16 +192,17 @@ compared with none. Mode 0 submits the quad without any layer-settings struct.
 - `grab.{h,cpp}` — `Grab`: per-frame `update(pressed, grabberPose, allowStart, &position)`; keeps
   the object's offset in the grabber's frame. Used for both grips and the `simgrab` debug prop;
   a hand-tracking pinch can reuse it with a different pose source.
-- `xr_math.h` — vector/quaternion helpers and `facing()` (upright, facing a point).
+- `xr_math.h` — vector/quaternion helpers, `facing()` (upright, facing a point), the slide/orbit
+  maths and `cylinderFor()` (cylinder pose, radius and arc for the curved screen).
 - `screen_source.h` — the seam between the XR shell and the content (`ScreenSource`/`ScreenHost`,
-  `PlacementCommand`).
+  `ScreenCommand`).
 - `mediacodec_source.{h,cpp}` — the `ScreenSource`: glues the network client to the decoder,
   owns the status text, asks `XrApp` to resize the Surface to the stream size.
 - `stream_client.{h,cpp}` — protocol v1 client on its own thread: the USB/Wi-Fi policy above
   (UDP discovery, last host), numeric-IP connects in 50 ms slices so `stop()` is immediate, hello
   check, CONFIG validation (1..8192, even), message parsing (unknown types skipped), PING every
   500 ms (5 fast ones after connect, offset from the lowest-RTT of the last 16), `FRAME_ACK` after
-  every batch of consumed frames, `CONTROL` → `PlacementCommand`, dead-link timeout.
+  every batch of consumed frames, `CONTROL` → `ScreenCommand`, dead-link timeout.
 - `video_decoder.{h,cpp}` — AMediaCodec into the ANativeWindow; `low-latency=1`,
   `vendor.qti-ext-dec-low-latency.enable=1`, `priority=0`; prefers
   `c2.qti.avc.decoder.low_latency` for H.264 and falls back to the default decoder if it rejects
@@ -220,6 +233,8 @@ Runtime facts found on this Quest 3 (runtime "Oculus 209.166.0"):
 - `xrCreateSwapchainAndroidSurfaceKHR` requires `format`, `sampleCount`, `faceCount`,
   `arraySize`, `mipCount` to be 0 (otherwise `XR_ERROR_VALIDATION_FAILURE`).
 - The compositor samples Android-surface swapchains bottom-up: both CPU-drawn buffers and
-  MediaCodec output appear upside down unless the quad carries
-  `XR_FB_composition_layer_image_layout`'s `VERTICAL_FLIP` bit. The app sets it on both quads.
-- No projection layer is needed: frames contain only the passthrough layer and one quad.
+  MediaCodec output appear upside down unless the layer carries
+  `XR_FB_composition_layer_image_layout`'s `VERTICAL_FLIP` bit. The app sets it on the quads and
+  on the cylinder.
+- No projection layer is needed: frames contain only the passthrough layer and one screen layer
+  (quad or cylinder).

@@ -207,8 +207,8 @@ bool MediaCodecSource::onFrame(const EncodedFrame& frame) {
     return true;
 }
 
-void MediaCodecSource::onControl(const PlacementCommand& command) {
-    if (host_ != nullptr) host_->placementCommand(command);
+void MediaCodecSource::onControl(const ScreenCommand& command) {
+    if (host_ != nullptr) host_->screenCommand(command);
 }
 
 void MediaCodecSource::onDisconnected(const std::string& reason) {

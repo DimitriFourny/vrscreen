@@ -70,6 +70,8 @@ constexpr int32_t kInitialSurfaceHeight = 1080;
 constexpr float kMinDistance = 0.5f, kMaxDistance = 3.0f;
 constexpr float kMinWidth = 0.5f, kMaxWidth = 5.0f;
 constexpr float kStatusWidthFraction = 0.6f;  // status panel width relative to the screen width
+// Widest arc of the curved screen (radians); a wider screen gets a larger radius instead.
+constexpr float kMaxCylinderAngle = 2.8f;
 constexpr float kStickDeadzone = 0.25f;
 constexpr float kDistanceSpeed = 0.8f;  // m/s at full deflection
 constexpr float kWidthDoublingsPerSecond = 0.7f;
@@ -194,6 +196,8 @@ bool XrApp::createInstance() {
     if (hasAutoFilter_) enabled.push_back(XR_META_AUTOMATIC_LAYER_FILTER_EXTENSION_NAME);
     hasImageLayout_ = hasExtension(available, XR_FB_COMPOSITION_LAYER_IMAGE_LAYOUT_EXTENSION_NAME);
     if (hasImageLayout_) enabled.push_back(XR_FB_COMPOSITION_LAYER_IMAGE_LAYOUT_EXTENSION_NAME);
+    hasCylinder_ = hasExtension(available, XR_KHR_COMPOSITION_LAYER_CYLINDER_EXTENSION_NAME);
+    if (hasCylinder_) enabled.push_back(XR_KHR_COMPOSITION_LAYER_CYLINDER_EXTENSION_NAME);
     for (const char* name : enabled) LOGI("Enabling extension %s", name);
     if (!hasLayerSettings_) LOGW("%s not available: quad sharpening/super-sampling disabled",
                                  XR_FB_COMPOSITION_LAYER_SETTINGS_EXTENSION_NAME);
@@ -224,7 +228,8 @@ bool XrApp::createInstance() {
            loadFunction(instance_, "xrCreatePassthroughFB", &pfnCreatePassthroughFB) &&
            loadFunction(instance_, "xrDestroyPassthroughFB", &pfnDestroyPassthroughFB) &&
            loadFunction(instance_, "xrCreatePassthroughLayerFB", &pfnCreatePassthroughLayerFB) &&
-           loadFunction(instance_, "xrDestroyPassthroughLayerFB", &pfnDestroyPassthroughLayerFB);
+           loadFunction(instance_, "xrDestroyPassthroughLayerFB", &pfnDestroyPassthroughLayerFB) &&
+           loadFunction(instance_, "xrPassthroughLayerSetStyleFB", &pfnPassthroughLayerSetStyleFB);
 }
 
 bool XrApp::initSystem() {
@@ -760,21 +765,35 @@ void XrApp::setPlacement(float distance, float width, const char* reason) {
     }
 }
 
-void XrApp::placementCommand(const PlacementCommand& command) {
+void XrApp::screenCommand(const ScreenCommand& command) {
     std::lock_guard<std::mutex> lock(commandMutex_);
     commands_.push_back(command);
 }
 
-void XrApp::applyPlacementCommands() {
-    std::vector<PlacementCommand> commands;
+void XrApp::applyScreenCommands() {
+    std::vector<ScreenCommand> commands;
     {
         std::lock_guard<std::mutex> lock(commandMutex_);
         commands.swap(commands_);
     }
-    using Kind = PlacementCommand::Kind;
+    using Kind = ScreenCommand::Kind;
     constexpr float kDegrees = 3.14159265f / 180.0f;
     constexpr float kMaxElevation = 80.0f * kDegrees;
-    for (const PlacementCommand& c : commands) {
+    for (const ScreenCommand& c : commands) {
+        // Presentation: absolute values, applied whatever the placement state (even mid-grab).
+        if (c.kind == Kind::SetCurvature) {
+            const float curvature = static_cast<float>(c.a) / 1000.0f;
+            if (curvature != curvature_) {
+                LOGI("Mac CONTROL SET_CURVATURE %d permille%s", c.a,
+                     hasCylinder_ || c.a == 0 ? "" : " ignored: XR_KHR_composition_layer_cylinder not available");
+            }
+            curvature_ = hasCylinder_ ? curvature : 0.0f;
+            continue;
+        }
+        if (c.kind == Kind::SetDim) {
+            setPassthroughDim(static_cast<float>(c.a) / 1000.0f);
+            continue;
+        }
         const char* name = c.kind == Kind::Recenter       ? "RECENTER"
                            : c.kind == Kind::Distance     ? "DISTANCE"
                            : c.kind == Kind::Size         ? "SIZE"
@@ -824,6 +843,9 @@ void XrApp::applyPlacementCommands() {
             case Kind::SizeFine:
                 setPlacement(placement_.distance, placement_.width * std::pow(1.1f, 0.01f * c.a), nullptr);
                 break;
+            case Kind::SetCurvature:
+            case Kind::SetDim:
+                break;  // handled above
         }
         // Saved like the thumbstick: half a second after the last change, so a mouse or scroll-wheel
         // stream of small deltas does not write the file 60 times a second.
@@ -844,6 +866,22 @@ void XrApp::applyPlacementCommands() {
              quadPose_.position.y, quadPose_.position.z, placement_.width, placement_.distance,
              placement_.heightOffset);
     }
+}
+
+void XrApp::setPassthroughDim(float dim) {
+    dim = std::clamp(dim, 0.0f, 1.0f);
+    if (dim == dim_ || passthroughLayer_ == XR_NULL_HANDLE) return;
+    // Fade the passthrough towards the black behind it; no edge rendering, so nothing glows.
+    XrPassthroughStyleFB style{XR_TYPE_PASSTHROUGH_STYLE_FB};
+    style.textureOpacityFactor = 1.0f - dim;
+    style.edgeColor = {0.0f, 0.0f, 0.0f, 0.0f};
+    const XrResult r = pfnPassthroughLayerSetStyleFB(passthroughLayer_, &style);
+    if (XR_FAILED(r)) {
+        LOGE("xrPassthroughLayerSetStyleFB(opacity %.2f): %s", style.textureOpacityFactor, resultString(r).c_str());
+        return;
+    }
+    dim_ = dim;
+    LOGI("Mac CONTROL SET_DIM %.0f permille: passthrough opacity %.2f", dim * 1000.0f, style.textureOpacityFactor);
 }
 
 void XrApp::flushControlBurstLog() {
@@ -986,7 +1024,7 @@ void XrApp::renderFrame() {
     }
     if (recenterRequested_ && recenter(frameState.predictedDisplayTime)) recenterRequested_ = false;
     updateGrabs(frameState.predictedDisplayTime);
-    applyPlacementCommands();
+    applyScreenCommands();
     if (placementDirty_) {
         // Persist half a second after the last thumbstick or Mac CONTROL change.
         placementIdleSeconds_ += dt;
@@ -1038,12 +1076,31 @@ void XrApp::renderFrame() {
     quad.pose = quadPose_;
     quad.size = {width, width * static_cast<float>(shown.height) / static_cast<float>(std::max(shown.width, 1))};
 
+    // Curved screen: same centre and facing as the quad, arc length = width (status panel stays flat).
+    const bool curved = picture && curvature_ > 0.0f;
+    XrCompositionLayerCylinderKHR cylinder{XR_TYPE_COMPOSITION_LAYER_CYLINDER_KHR};
+    if (curved) {
+        const CylinderGeometry g = cylinderFor(quadPose_, width, placement_.distance, curvature_, kMaxCylinderAngle);
+        cylinder.next = chain;
+        cylinder.layerFlags = 0;  // opaque
+        cylinder.space = localSpace_;
+        cylinder.eyeVisibility = XR_EYE_VISIBILITY_BOTH;
+        cylinder.subImage = quad.subImage;
+        cylinder.pose = g.pose;
+        cylinder.radius = g.radius;
+        cylinder.centralAngle = g.centralAngle;
+        cylinder.aspectRatio = static_cast<float>(shown.width) / static_cast<float>(std::max(shown.height, 1));
+    }
+
     const XrCompositionLayerBaseHeader* layers[2];
     uint32_t layerCount = 0;
     if (frameState.shouldRender && visible_) {
         layers[layerCount++] = reinterpret_cast<const XrCompositionLayerBaseHeader*>(&passthroughLayer);
         const bool showQuad = quadPlaced_ && shown.swapchain != XR_NULL_HANDLE && (picture || statusDrawn_);
-        if (showQuad) layers[layerCount++] = reinterpret_cast<const XrCompositionLayerBaseHeader*>(&quad);
+        if (showQuad) {
+            layers[layerCount++] = curved ? reinterpret_cast<const XrCompositionLayerBaseHeader*>(&cylinder)
+                                          : reinterpret_cast<const XrCompositionLayerBaseHeader*>(&quad);
+        }
     }
 
     XrFrameEndInfo endInfo{XR_TYPE_FRAME_END_INFO};

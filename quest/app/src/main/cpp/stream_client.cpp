@@ -589,10 +589,10 @@ bool StreamClient::handleMessage(uint8_t type, const uint8_t* payload, uint32_t 
             return true;
         }
         case kMsgControl: {
-            // command u8 | args (i8 or big-endian i16); unknown commands and extra bytes are ignored.
+            // command u8 | args (i8, big-endian i16 or u16); unknown commands and extra bytes are ignored.
             if (length < 1) return true;
-            using Kind = PlacementCommand::Kind;
-            PlacementCommand command;
+            using Kind = ScreenCommand::Kind;
+            ScreenCommand command;
             int args = 0;     // number of arguments
             int argSize = 1;  // bytes per argument
             switch (payload[0]) {
@@ -604,6 +604,8 @@ bool StreamClient::handleMessage(uint8_t type, const uint8_t* payload, uint32_t 
                 case 0x07: command.kind = Kind::Orbit; args = 2; argSize = 2; break;
                 case 0x08: command.kind = Kind::DistanceFine; args = 1; argSize = 2; break;
                 case 0x09: command.kind = Kind::SizeFine; args = 1; argSize = 2; break;
+                case 0x0A: command.kind = Kind::SetCurvature; args = 1; argSize = 2; break;
+                case 0x0B: command.kind = Kind::SetDim; args = 1; argSize = 2; break;
                 default:  // includes 0x02, the removed MOVE
                     LOGI("CONTROL: unknown command 0x%02x ignored", payload[0]);
                     return true;
@@ -619,6 +621,10 @@ bool StreamClient::handleMessage(uint8_t type, const uint8_t* payload, uint32_t 
             };
             if (args >= 1) command.a = arg(0);
             if (args >= 2) command.b = arg(1);
+            if (command.presentation()) {
+                // u16 permille, clamped to 0..1000.
+                command.a = static_cast<int16_t>(std::min<uint16_t>(readU16(payload + 1), 1000));
+            }
             listener_.onControl(command);
             return true;
         }

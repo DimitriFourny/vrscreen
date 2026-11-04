@@ -38,7 +38,7 @@ private:
     void onConnected(const std::string& transport) override;
     bool onConfig(const StreamConfig& config) override;
     bool onFrame(const EncodedFrame& frame) override;
-    void onControl(const PlacementCommand& command) override;
+    void onControl(const ScreenCommand& command) override;
     void onDisconnected(const std::string& reason) override;
     bool onStatsTick(const LinkStats& stats) override;
 

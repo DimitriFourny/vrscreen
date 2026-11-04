@@ -66,8 +66,8 @@ public:
     // Called for every FRAME. When it returns, the frame counts as consumed (handed to the decoder
     // or deliberately discarded) and is acknowledged with FRAME_ACK. Return false to reconnect.
     virtual bool onFrame(const EncodedFrame& frame) = 0;
-    // CONTROL message from the Mac (keyboard shortcuts): move or resize the screen.
-    virtual void onControl(const PlacementCommand& command) = 0;
+    // CONTROL message from the Mac (shortcuts, menu-bar icon): move, resize or restyle the screen.
+    virtual void onControl(const ScreenCommand& command) = 0;
     virtual void onDisconnected(const std::string& reason) = 0;
     // About once per second while connected. Return false to reconnect (e.g. the decoder died).
     virtual bool onStatsTick(const LinkStats& stats) = 0;
