@@ -19,12 +19,15 @@ struct SenderOptions {
     var height = 1080
     var hotkeys = true
     var mouse = true
+    var menu = true
+    /// Headset on USB for the menu's travel-mode items (scripts/mirror.sh passes it).
+    var adbSerial: String?
     /// Degrees of ORBIT per point of mouse movement.
     var mouseDegreesPerPoint = 0.1
     /// Multiplier on the scroll → DISTANCE_FINE / SIZE_FINE scaling.
     var scrollSensitivity = 1.0
-    /// CONTROL commands sent to every client right after it connects (testing).
-    var controlOnConnect: [ControlCommand] = []
+    /// Steps sent to every client right after it connects (testing).
+    var controlOnConnect: [DebugControlStep] = []
 
     static let usage = """
     Usage: quest-mirror-sender [options]
@@ -46,6 +49,9 @@ struct SenderOptions {
       --width N --height N     Test source size (default 1920x1080).
       --no-hotkeys             Do not register the global ⌃⌥⌘ screen-placement shortcuts.
       --no-mouse               Do not use ⌃⌥⌘ + mouse (orbit) and ⌃⌥⌘ + scroll (zoom).
+      --no-menu                No menu-bar icon (curvature, dimming, re-center, quit).
+      --adb-serial S           Headset on USB (adb serial) for the menu's travel-mode
+                               items; without it they show "headset not on USB".
       --mouse-sensitivity DEG  Orbit degrees per point of mouse movement (default 0.1).
       --scroll-sensitivity X   Scroll zoom multiplier (default 1; a wheel notch is a
                                quarter DISTANCE/SIZE step).
@@ -104,6 +110,8 @@ struct SenderOptions {
             case "--height": o.height = try int(arg, min: 16) & ~1
             case "--no-hotkeys": o.hotkeys = false
             case "--no-mouse": o.mouse = false
+            case "--no-menu": o.menu = false
+            case "--adb-serial": o.adbSerial = try value(arg)
             case "--mouse-sensitivity": o.mouseDegreesPerPoint = try double(arg)
             case "--scroll-sensitivity": o.scrollSensitivity = try double(arg)
             case "--debug-control-on-connect": o.controlOnConnect = try parseControlSpec(try value(arg))
@@ -119,9 +127,10 @@ struct SenderOptions {
 
     /// Parses `cmd[:args][*N];...` with cmd one of recenter, reset, translate:DX,DY,
     /// distance:STEPS, size:STEPS (-128...127), orbit:YAW,PITCH (1/100 degree),
-    /// distance_fine:V, size_fine:V (-32768...32767); `*N` repeats the item N times.
-    static func parseControlSpec(_ spec: String) throws -> [ControlCommand] {
-        try spec.split(separator: ";").flatMap { rawItem -> [ControlCommand] in
+    /// distance_fine:V, size_fine:V (-32768...32767), curvature:N, dim:N (permille,
+    /// 0...1000), or wait:MS (pause before the next command); `*N` repeats the item.
+    static func parseControlSpec(_ spec: String) throws -> [DebugControlStep] {
+        try spec.split(separator: ";").flatMap { rawItem -> [DebugControlStep] in
             let item = rawItem.trimmingCharacters(in: .whitespaces)
             let repeatParts = item.split(separator: "*", maxSplits: 1)
             var repeatCount = 1
@@ -143,6 +152,9 @@ struct SenderOptions {
             }
             let command: ControlCommand
             switch name {
+            case "wait":
+                let ms = try values(1, UInt32.self)[0]
+                return Array(repeating: .wait(milliseconds: Int(ms)), count: repeatCount)
             case "recenter": _ = try values(0, Int8.self); command = .recenter
             case "reset": _ = try values(0, Int8.self); command = .reset
             case "translate": let v = try values(2, Int8.self); command = .translate(dx: v[0], dy: v[1])
@@ -151,11 +163,23 @@ struct SenderOptions {
             case "orbit": let v = try values(2, Int16.self); command = .orbit(yawCentidegrees: v[0], pitchCentidegrees: v[1])
             case "distance_fine": command = .distanceFine(try values(1, Int16.self)[0])
             case "size_fine": command = .sizeFine(try values(1, Int16.self)[0])
+            case "curvature", "dim":
+                let v = try values(1, UInt16.self)[0]
+                guard v <= ControlCommand.permilleMax else {
+                    throw OptionError("--debug-control-on-connect: '\(item)' must be 0...1000 (permille)")
+                }
+                command = name == "curvature" ? .setCurvature(v) : .setDim(v)
             default: throw OptionError("--debug-control-on-connect: unknown command '\(name)'")
             }
-            return Array(repeating: command, count: repeatCount)
+            return Array(repeating: .send(command), count: repeatCount)
         }
     }
+}
+
+/// One item of --debug-control-on-connect.
+enum DebugControlStep: Equatable {
+    case send(ControlCommand)
+    case wait(milliseconds: Int)
 }
 
 struct OptionError: Error, CustomStringConvertible {

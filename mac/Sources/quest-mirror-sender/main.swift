@@ -20,6 +20,10 @@ let server = MirrorServer(port: options.port, maxFramesInFlight: UInt32(options.
 let pipeline = SenderPipeline(queue: queue, encoder: encoder, server: server)
 let discovery = options.discoveryPort.map { DiscoveryResponder(port: $0, tcpPort: options.port, queue: queue) }
 server.controlOnConnect = options.controlOnConnect
+// Curvature/dim persist across restarts and are sent to every client, with or without the menu.
+let settingsStore = DisplaySettingsStore.standard
+let initialDisplaySettings = settingsStore.load()
+server.updateDisplaySettings(initialDisplaySettings)
 let deliver: (CVPixelBuffer, UInt64) -> Void = { buffer, micros in pipeline.handleCapture(buffer, captureMicros: micros) }
 
 var testSource: TestPatternSource?
@@ -60,43 +64,80 @@ statsTimer.setEventHandler {
 }
 statsTimer.resume()
 
-// SIGHUP too (terminal closed): every shutdown goes through exit(), whose atexit
-// handler also restores the cursor if a mouse gesture had frozen it.
+/// Clean shutdown on `queue`: Ctrl-C, SIGTERM, SIGHUP (terminal closed) and the menu's
+/// Quit all come here. Every path ends in exit(), whose atexit handler also restores the
+/// cursor if a mouse gesture had frozen it.
+func shutdown() {
+    log("shutting down")
+    CursorFreeze.release()
+    statsTimer.cancel()
+    testSource?.stop()
+    server.stop()
+    discovery?.stop()
+    pipeline.stop()
+    if let screen = screenSource {
+        screen.stop { exit(0) }
+        // Do not hang on a stuck capture stop.
+        queue.asyncAfter(deadline: .now() + 2) { exit(0) }
+    } else {
+        exit(0)
+    }
+}
+
 signal(SIGINT, SIG_IGN)
 signal(SIGTERM, SIG_IGN)
 signal(SIGHUP, SIG_IGN)
 var signalSources: [DispatchSourceSignal] = []
 for sig in [SIGINT, SIGTERM, SIGHUP] {
     let source = DispatchSource.makeSignalSource(signal: sig, queue: queue)
-    source.setEventHandler {
-        log("shutting down")
-        CursorFreeze.release()
-        statsTimer.cancel()
-        testSource?.stop()
-        server.stop()
-        discovery?.stop()
-        pipeline.stop()
-        if let screen = screenSource {
-            screen.stop { exit(0) }
-            // Do not hang on a stuck capture stop.
-            queue.asyncAfter(deadline: .now() + 2) { exit(0) }
-        } else {
-            exit(0)
-        }
-    }
+    source.setEventHandler { shutdown() }
     source.resume()
     signalSources.append(source)
 }
 
-// Global shortcuts and mouse gestures need the main thread to run an AppKit/Carbon
-// event loop; the accessory policy keeps the sender out of the Dock and the app
-// switcher. Signals are still handled on `queue`, so Ctrl-C shuts down as before.
+// Shortcuts, mouse gestures and the menu-bar icon need the main thread to run an
+// AppKit/Carbon event loop; the accessory policy keeps the sender out of the Dock and
+// the app switcher. Signals are still handled on `queue`, so Ctrl-C shuts down as before.
 var hotkeys: HotkeyController?
 var mouse: MouseControl?
+var statusMenu: StatusMenu?
 var lastMouseDropLog = Date.distantPast
-if options.hotkeys || options.mouse {
+if options.hotkeys || options.mouse || options.menu {
     let app = NSApplication.shared
     app.setActivationPolicy(.accessory)
+    if options.menu {
+        let travelModeSource: StatusMenu.TravelModeSource
+        if let serial = options.adbSerial {
+            if let executable = HeadsetAdb.locateExecutable() {
+                travelModeSource = .adb(HeadsetAdb(executable: executable, serial: serial))
+            } else {
+                travelModeSource = .unavailable(.adbMissing)
+            }
+        } else {
+            travelModeSource = .unavailable(.notOnUSB)
+        }
+        let menu = StatusMenu(
+            store: settingsStore, settings: initialDisplaySettings, travelModeSource: travelModeSource,
+            onSettingsChange: { settings in queue.async { server.updateDisplaySettings(settings) } },
+            onCommand: { command in
+                queue.async {
+                    if let address = server.sendControl(command) {
+                        log("menu: \(command) → \(address)")
+                    } else {
+                        log("menu: \(command): no client connected, dropped")
+                    }
+                }
+            },
+            onQuit: { queue.async { shutdown() } })
+        menu.install()
+        queue.async {
+            // Server state lives on `queue`; also show a client that connected before this ran.
+            server.onActiveClientChanged = { address in DispatchQueue.main.async { menu.setClient(address: address) } }
+            let current = server.activeClient?.address
+            DispatchQueue.main.async { menu.setClient(address: current) }
+        }
+        statusMenu = menu
+    }
     if options.hotkeys {
         let controller = HotkeyController { binding, isRepeat in
             queue.async {

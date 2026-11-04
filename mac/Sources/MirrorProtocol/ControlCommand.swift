@@ -20,6 +20,12 @@ public enum ControlCommand: Equatable, Sendable, CustomStringConvertible {
     case distanceFine(Int16)
     /// Width × 1.1^(value/100); + = bigger (100 = one SIZE step).
     case sizeFine(Int16)
+    /// Absolute screen curvature in permille (0 = flat, 1000 = cylinder radius equal to
+    /// the viewing distance; radius = distance / (value/1000)). Receivers clamp to 1000.
+    case setCurvature(UInt16)
+    /// Absolute dimming of the surroundings (passthrough) in permille: 0 = normal,
+    /// 1000 = black. Never dims the screen. Receivers clamp to 1000.
+    case setDim(UInt16)
     /// A command this implementation does not know; receivers ignore it.
     case unknown(command: UInt8, args: Data)
 
@@ -31,6 +37,10 @@ public enum ControlCommand: Equatable, Sendable, CustomStringConvertible {
     public static let orbitCode: UInt8 = 0x07
     public static let distanceFineCode: UInt8 = 0x08
     public static let sizeFineCode: UInt8 = 0x09
+    public static let setCurvatureCode: UInt8 = 0x0A
+    public static let setDimCode: UInt8 = 0x0B
+    /// Upper end of SET_CURVATURE / SET_DIM values.
+    public static let permilleMax: UInt16 = 1000
 
     /// The CONTROL payload.
     public func encoded() -> Data {
@@ -51,6 +61,12 @@ public enum ControlCommand: Equatable, Sendable, CustomStringConvertible {
             data.appendBigEndian(v)
         case .sizeFine(let v):
             data.append(Self.sizeFineCode)
+            data.appendBigEndian(v)
+        case .setCurvature(let v):
+            data.append(Self.setCurvatureCode)
+            data.appendBigEndian(v)
+        case .setDim(let v):
+            data.append(Self.setDimCode)
             data.appendBigEndian(v)
         case .unknown(let command, let args):
             data.append(command)
@@ -85,6 +101,9 @@ public enum ControlCommand: Equatable, Sendable, CustomStringConvertible {
         case orbitCode: return .orbit(yawCentidegrees: try i16(), pitchCentidegrees: try i16())
         case distanceFineCode: return .distanceFine(try i16())
         case sizeFineCode: return .sizeFine(try i16())
+        case setCurvatureCode, setDimCode:
+            guard let v = r.u16() else { throw missing }
+            return command == setCurvatureCode ? .setCurvature(v) : .setDim(v)
         default: return .unknown(command: command, args: r.rest())
         }
     }
@@ -101,6 +120,8 @@ public enum ControlCommand: Equatable, Sendable, CustomStringConvertible {
         case .orbit(let yaw, let pitch): return "ORBIT yaw=\(degrees(yaw)) pitch=\(degrees(pitch))"
         case .distanceFine(let v): return "DISTANCE_FINE \(signed(v))"
         case .sizeFine(let v): return "SIZE_FINE \(signed(v))"
+        case .setCurvature(let v): return "SET_CURVATURE \(v) (\(String(format: "%.1f", Double(v) / 10)) %)"
+        case .setDim(let v): return "SET_DIM \(v) (\(String(format: "%.1f", Double(v) / 10)) %)"
         case .unknown(let command, let args): return "unknown command 0x\(String(command, radix: 16)) (\(args.count) arg bytes)"
         }
     }

@@ -105,8 +105,12 @@ cleanup() {
     fi
 }
 trap cleanup EXIT
+SENDER_EXTRA=()
 if (( USB )); then
-    say "Headset on USB: $(adb shell getprop ro.product.model 2>/dev/null | tr -d '\r') ($(adb get-serialno))"
+    SERIAL="$(adb get-serialno | tr -d '\r')"
+    say "Headset on USB: $(adb shell getprop ro.product.model 2>/dev/null | tr -d '\r') ($SERIAL)"
+    # The menu's travel-mode items read the state over adb from this headset.
+    SENDER_EXTRA=(--adb-serial "$SERIAL")
     if (( INSTALL )); then
         say "Building the Quest app"
         # Gradle needs a JDK; shells that don't source ~/.zshrc lack JAVA_HOME.
@@ -143,11 +147,13 @@ fi
 discovery=1
 hotkeys=1
 mouse=1
+menu=1
 for arg in ${SENDER_ARGS[@]+"${SENDER_ARGS[@]}"}; do
     case "$arg" in
         --no-discovery) discovery=0 ;;
         --no-hotkeys) hotkeys=0 ;;
         --no-mouse) mouse=0 ;;
+        --no-menu) menu=0 ;;
     esac
 done
 addresses=""
@@ -172,10 +178,14 @@ fi
 if (( mouse )); then
     say "Hold ⌃⌥⌘ and move the mouse to orbit it around you; ⌃⌥⌘ + scroll: closer/farther, ⌃⌥⌘⇧ + scroll: bigger/smaller"
 fi
+if (( menu )); then
+    say "Menu-bar icon (goggles): curved screen and dim-surroundings sliders, re-center, reset, travel mode (USB), quit"
+fi
 
 # 5. Sender in the foreground. Ctrl-C reaches it directly; it shuts down cleanly and
 # the EXIT trap removes the reverse.
 say "Starting quest-mirror-sender on TCP $PORT (Ctrl-C to stop)"
 status=0
-"$SENDER" --port "$PORT" --discovery-port "$DISCOVERY_PORT" ${SENDER_ARGS[@]+"${SENDER_ARGS[@]}"} || status=$?
+"$SENDER" --port "$PORT" --discovery-port "$DISCOVERY_PORT" ${SENDER_EXTRA[@]+"${SENDER_EXTRA[@]}"} \
+    ${SENDER_ARGS[@]+"${SENDER_ARGS[@]}"} || status=$?
 exit "$status"

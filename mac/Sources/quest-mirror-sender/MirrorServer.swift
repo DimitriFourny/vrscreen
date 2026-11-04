@@ -61,8 +61,12 @@ final class MirrorServer {
     var onFrameAck: ((ClientSession) -> Void)?
     /// Most recent CONFIG produced by the encoder; sent right after the hello.
     var cachedConfig: ConfigMessage?
-    /// CONTROL commands sent to every client right after the hello (--debug-control-on-connect).
-    var controlOnConnect: [ControlCommand] = []
+    /// Steps sent to every client right after the hello (--debug-control-on-connect).
+    var controlOnConnect: [DebugControlStep] = []
+    /// Curvature/dim; sent to every client right after the hello and on every change.
+    private(set) var displaySettings = DisplaySettings.defaults
+    /// Called on `queue` with the active client's address, or nil when none is connected.
+    var onActiveClientChanged: ((String?) -> Void)?
 
     private(set) var activeClient: ClientSession?
     private(set) var bytesSent = 0
@@ -133,6 +137,15 @@ final class MirrorServer {
         return client.address
     }
 
+    /// Records new curvature/dim and sends the changed value(s) to the active client.
+    func updateDisplaySettings(_ settings: DisplaySettings) {
+        let old = displaySettings
+        displaySettings = settings
+        guard let client = activeClient else { return }
+        if settings.curvature != old.curvature { send(.control(.setCurvature(settings.curvature)), to: client) }
+        if settings.dim != old.dim { send(.control(.setDim(settings.dim)), to: client) }
+    }
+
     // MARK: Connections
 
     private func acceptPending() {
@@ -153,28 +166,43 @@ final class MirrorServer {
             }
             activeClient = client
             log("server: client \(client.address) connected")
+            onActiveClientChanged?(client.address)
             startIO(client)
             enqueue(WireProtocol.helloBytes(), to: client, completion: nil)
             if let config = cachedConfig {
                 send(.config(config), to: client)
                 client.sentConfig = config
             }
+            // Absolute state the sender owns; clients apply it whenever it arrives.
+            for command in displaySettings.commands { send(.control(command), to: client) }
             if !controlOnConnect.isEmpty { sendControlOnConnect(to: client) }
             onClientReady?(client)
         }
     }
 
-    /// --debug-control-on-connect: the first command goes out right after the hello,
-    /// the rest one per 1/60 s (like a 60 Hz mouse gesture), while the client stays connected.
+    /// --debug-control-on-connect: the first command goes out right after the hello, the
+    /// rest one per 1/60 s (like a 60 Hz mouse gesture), `wait:MS` steps add a pause;
+    /// only while the client stays connected.
     private func sendControlOnConnect(to client: ClientSession) {
-        let commands = controlOnConnect
-        log("server: sending \(commands.count) CONTROL command(s) to \(client.address) at 60 Hz (--debug-control-on-connect)")
-        for (index, command) in commands.enumerated() {
-            queue.asyncAfter(deadline: .now() + .microseconds(index * 16_667)) { [weak self, weak client] in
+        var schedule: [(offsetMicros: Int, command: ControlCommand)] = []
+        var offset = 0
+        for step in controlOnConnect {
+            switch step {
+            case .send(let command):
+                schedule.append((offset, command))
+                offset += 16_667
+            case .wait(let milliseconds):
+                offset += milliseconds * 1000
+            }
+        }
+        log("server: sending \(schedule.count) CONTROL command(s) to \(client.address) over "
+            + String(format: "%.2f s (--debug-control-on-connect)", Double(offset) / 1e6))
+        for (index, item) in schedule.enumerated() {
+            queue.asyncAfter(deadline: .now() + .microseconds(item.offsetMicros)) { [weak self, weak client] in
                 guard let self, let client, client.isActive else { return }
-                self.send(.control(command), to: client)
-                if index == commands.count - 1 {
-                    log("server: sent \(commands.count) CONTROL command(s) to \(client.address), last: \(command)")
+                self.send(.control(item.command), to: client)
+                if schedule.count <= 20 || index == schedule.count - 1 {
+                    log("server: sent CONTROL \(item.command) to \(client.address) (\(index + 1)/\(schedule.count))")
                 }
             }
         }
@@ -218,7 +246,10 @@ final class MirrorServer {
     private func drop(_ client: ClientSession, reason: String) {
         guard client.isActive else { return }
         client.isActive = false
-        if activeClient === client { activeClient = nil }
+        if activeClient === client {
+            activeClient = nil
+            onActiveClientChanged?(nil)
+        }
         log("server: client \(client.address) disconnected (\(reason))")
         client.pending.removeAll()
         client.readSource?.cancel()

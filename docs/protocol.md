@@ -203,9 +203,11 @@ as soon as the user acts; it is not subject to the frame windows of "Flow contro
 | `0x07`  | ORBIT         | `yaw i16`, `pitch i16` | Rotate the screen around the head position by `yaw`/100 degrees (positive = right) and `pitch`/100 degrees (positive = up), keeping its distance; the screen turns to keep facing the head. |
 | `0x08`  | DISTANCE_FINE | `v i16`                | Distance × 1.1^(v/100); positive = farther. `v = 100` equals one DISTANCE step. |
 | `0x09`  | SIZE_FINE     | `v i16`                | Width × 1.1^(v/100); positive = bigger. `v = 100` equals one SIZE step. |
+| `0x0A`  | SET_CURVATURE | `value u16`            | **Absolute** curvature in permille, clamped to 0–1000: 0 = flat; otherwise the screen bends around the viewer on a cylinder of radius = viewing distance / (value/1000), so 1000 = radius equal to the viewing distance. |
+| `0x0B`  | SET_DIM       | `value u16`            | **Absolute** dimming of the surroundings (passthrough) in permille, clamped to 0–1000: 0 = normal passthrough, 1000 = fully black. Never dims the screen itself. |
 
-- `i8` is a signed byte, `i16` a signed big-endian 16-bit integer (two's complement):
-  `FF` = −1, `FF E7` = −25.
+- `i8` is a signed byte, `i16` a signed and `u16` an unsigned big-endian 16-bit integer
+  (two's complement for signed): `FF` = −1, `FF E7` = −25, `03 E8` = 1000.
 - Step sizes of the step commands are up to the client. The reference client (Quest
   app) uses 5 cm per TRANSLATE step, distance × 1.1^steps and width × 1.1^steps
   (aspect ratio kept), each clamped to its own range. ORBIT, DISTANCE_FINE and
@@ -218,6 +220,12 @@ as soon as the user acts; it is not subject to the frame windows of "Flow contro
 - ORBIT, DISTANCE_FINE and SIZE_FINE come from continuous mouse/scroll gestures: the
   sender coalesces input and sends at most one of each per 1/60 s, so a client can
   apply them directly (or smooth them over a frame).
+- SET_CURVATURE and SET_DIM carry absolute values (idempotent); the sender is the
+  source of truth for both. It sends both right after the hello on every connection
+  (after the cached CONFIG if there is one, before the first FRAME), and again on every
+  change; slider drags on the Mac are throttled to at most 30 messages per second, the
+  final value always included. Clients apply them whenever they arrive, before or after
+  CONFIG, and keep them across CONFIG changes.
 
 ### `0x10` PING (client → server)
 
@@ -356,6 +364,13 @@ CONTROL TRANSLATE `dx = −1, dy = +1`, ORBIT yaw +5.00° pitch −2.50°, and R
 03 00 00 00 01 01
 ```
 
+CONTROL SET_CURVATURE 350 (35 %) and SET_DIM 1000 (black surroundings):
+
+```
+03 00 00 00 03 0A 01 5E
+03 00 00 00 03 0B 03 E8
+```
+
 FRAME, keyframe, `captureTimeMicros = 2`, access unit `00 00 00 01 26 01 ...`:
 
 ```
@@ -367,6 +382,7 @@ FRAME, keyframe, `captureTimeMicros = 2`, access unit `00 00 00 01 26 01 ...`:
 ```
 server → client  hello  QMIR 0001
 server → client  CONFIG codec=2 3840x2160 (VPS SPS PPS, ~100 B)
+server → client  CONTROL SET_CURVATURE 350, CONTROL SET_DIM 0 (current settings)
 server → client  FRAME  key=1 (VPS SPS PPS + IDR slices)
 client → server  FRAME_ACK 1
 client → server  PING

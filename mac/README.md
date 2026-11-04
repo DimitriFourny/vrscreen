@@ -66,9 +66,11 @@ Stop either with Ctrl-C.
 | `--width N --height N`     | 1920x1080 | Test-pattern size                                          |
 | `--no-hotkeys`             | off     | Do not register the global screen-placement shortcuts        |
 | `--no-mouse`               | off     | Do not use ⌃⌥⌘ + mouse (orbit) / scroll (zoom)               |
+| `--no-menu`                | off     | No menu-bar icon                                             |
+| `--adb-serial S`           | none    | Headset on USB for the menu's travel-mode items (`scripts/mirror.sh` passes it) |
 | `--mouse-sensitivity DEG`  | 0.1     | Orbit degrees per point of mouse movement                    |
 | `--scroll-sensitivity X`   | 1       | Scroll zoom multiplier (a wheel notch is a quarter step)     |
-| `--debug-control-on-connect SPEC` | none | Testing: CONTROL commands sent to each client on connect, paced at 60 Hz, e.g. `"translate:1,0;orbit:50,0*50;distance_fine:-25;size_fine:30;recenter"` |
+| `--debug-control-on-connect SPEC` | none | Testing: CONTROL commands sent to each client on connect, paced at 60 Hz; `wait:MS` pauses; e.g. `"translate:1,0;orbit:50,0*50;curvature:500;wait:3000;dim:1000"` |
 
 Once per second it logs capture fps, encoded fps (and keyframes), captures skipped by
 backpressure, the bitrate actually sent, and the client with its unsent backlog and,
@@ -93,6 +95,46 @@ it), the last PING round trip, and the stream format. It acknowledges every FRAM
 (FRAME_ACK) as it hands it to the decoder, and reconnects every second while the
 sender is unreachable or after the sender restarts. CONTROL messages are printed
 (`control: TRANSLATE dx=+1 dy=0`, `control: ORBIT yaw=+0.50° pitch=+0.00°`).
+
+## Menu-bar icon
+
+The sender puts a Vision Pro–style icon in the menu bar (a template SF Symbol, so it
+follows light/dark mode; "QM" if the symbol is missing). Its menu has:
+
+- a status line: `Headset: USB (127.0.0.1)` (the adb tunnel), `Headset: Wi-Fi <ip>`
+  or `No headset connected`, updated live, also while the menu is open;
+- **Curved screen** 0–100 %: 0 = flat, 100 % = the screen wraps around you on a
+  cylinder whose radius is the viewing distance;
+- **Dim surroundings** 0–100 %: darkens the passthrough around the screen, up to
+  black; the screen itself is never dimmed;
+- **Re-center** and **Reset placement** (like ⌃⌥⌘R / ⌃⌥⌘0);
+- **Travel mode: On / Off** and **Open Quick Settings in headset…** (USB only, see below);
+- **Quit Quest Mirror**: the same clean shutdown as Ctrl-C (cursor released; when
+  started by `scripts/mirror.sh`, the script then removes its adb reverse).
+
+**Travel mode** (for using the headset in a moving vehicle) can't be switched from
+the Mac: Horizon OS only lets the headset's own Quick Settings toggle it. The menu
+shows its state, read with `adb shell dumpsys tracking` (the ` * Travel Mode:` line),
+and "Open Quick Settings in headset…" opens Quick Settings on the headset
+(`am start -a com.oculus.action.QUICK_SETTINGS`), where you tap the Travel mode tile.
+The state is read when the menu opens, every 3 s while it stays open, and 3, 6 and 10 s
+after opening Quick Settings. Each adb call runs in the background with a 3 s timeout,
+always with `ADB_MDNS=0`, and only if an adb server is already running: the sender
+never starts or stops the server. This needs the headset's serial (`--adb-serial`,
+which `scripts/mirror.sh` passes when the headset is on USB) and `adb` on PATH (or in
+`~/Library/Android/sdk/platform-tools`, `/opt/homebrew/bin`, `/usr/local/bin`).
+Otherwise the line explains why ("headset not on USB", "adb not found", "adb server
+not running", or "unavailable (dumpsys format changed)" if a Horizon OS update changes
+the output) and the Quick Settings item is disabled. Over Wi-Fi (`--wifi-only`) the
+items show "headset not on USB".
+
+The sliders update the headset while you drag (at most 30 messages per second, the
+final value always sent). The sender owns these two settings: it sends them to every
+headset that connects and stores them in
+`~/Library/Application Support/QuestMirror/settings.json` (`{"curvature": 0-1000,
+"dim": 0-1000}`, permille; written half a second after the last change, read at
+startup; defaults 0 and 0). The stored values are sent to clients even with
+`--no-menu`.
 
 ## Placing the screen: shortcuts and mouse
 
@@ -145,8 +187,8 @@ per second, and the log shows one summary line per second of activity (e.g.
 - The modifier state is polled 60 times a second from the session (no permission
   needed). `--no-mouse` turns all of this off.
 
-The sender runs an AppKit event loop for shortcuts and mouse as a background
-(accessory) app: no Dock icon, no menu bar.
+The sender runs an AppKit event loop for the menu, shortcuts and mouse as a
+background (accessory) app: a menu-bar icon, but no Dock icon and no app menu.
 
 ## Screen Recording permission
 
