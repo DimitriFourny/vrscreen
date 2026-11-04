@@ -19,7 +19,8 @@ namespace qm {
 // Lock order: decoderMutex_ before mutex_.
 class MediaCodecSource final : public ScreenSource, private StreamListener {
 public:
-    MediaCodecSource();
+    // `filesDir`: app-private directory where the client remembers the last Wi-Fi sender.
+    explicit MediaCodecSource(const std::string& filesDir);
     ~MediaCodecSource() override;
 
     // ScreenSource
@@ -33,12 +34,15 @@ public:
 
 private:
     // StreamListener (network thread)
-    void onConnecting(const std::string& endpoint, const std::string& lastError) override;
-    void onConnected(const std::string& endpoint) override;
+    void onSearching(const SearchState& state) override;
+    void onConnected(const std::string& transport) override;
     bool onConfig(const StreamConfig& config) override;
     bool onFrame(const EncodedFrame& frame) override;
     void onDisconnected(const std::string& reason) override;
-    void onStatsTick(const LinkStats& stats) override;
+    bool onStatsTick(const LinkStats& stats) override;
+
+    // Sets stopping_ (under mutex_) and wakes a network thread waiting for a Surface.
+    void requestStop();
 
     // Starts the decoder for config_ on a Surface of the stream's size (asking XrApp to resize
     // the Surface first if needed). Network thread only.
@@ -64,7 +68,7 @@ private:
     // Network thread only.
     StreamConfig config_;
     bool waitingForKeyframe_ = true;
-    std::string endpoint_;
+    std::string transport_;
 
     mutable std::mutex statusMutex_;
     std::string status_;

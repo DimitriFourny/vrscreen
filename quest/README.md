@@ -25,21 +25,38 @@ prefab); no Meta SDK is used.
 
 ```sh
 adb install -r app/build/outputs/apk/debug/app-debug.apk
-adb reverse tcp:7777 tcp:7777                     # USB: the app connects to 127.0.0.1:7777
-../mac/.build/release/quest-mirror-sender         # on the Mac (--source test needs no permission)
+../scripts/mirror.sh                              # on the Mac: the sender (see ../mac/README.md)
 adb shell am start -n com.df0.questmirror/android.app.NativeActivity
 adb shell am force-stop com.df0.questmirror       # stop
 ```
 
 It also appears in the headset library as "Quest Mirror" (Unknown Sources). Start order does not
-matter: the app retries every second and shows what it is waiting for on a panel in front of you
-("Waiting for the Mac on 127.0.0.1:7777 ...", "Connected ... waiting for a picture", last error).
+matter: the app keeps looking and shows what it is doing on a panel in front of you ("Looking for
+the Mac over USB and Wi-Fi ...", what each transport answered, "Connected over Wi-Fi 192.168.1.20
+(Mac name)", "... waiting for a picture").
 
-Wi-Fi instead of USB: point the app at the Mac before launching (read at every connect attempt):
+### USB or Wi-Fi
+
+Nothing to configure. Before every connection the app
+
+1. tries USB: `127.0.0.1:7777`, which `adb reverse tcp:7777 tcp:7777` tunnels to the Mac (without
+   a reverse it is refused at once; with a reverse but no sender, adbd closes it before the hello);
+2. meanwhile broadcasts a discovery request (UDP 7778, to 255.255.255.255 and the Wi-Fi subnet's
+   broadcast address) once per second; senders answer with their TCP port and name;
+3. if USB gave no hello, connects to the sender that answered, or else to the last Wi-Fi sender it
+   used (`files/last_host.txt`, so a network that drops broadcasts still works after one success).
+
+USB therefore wins whenever both are available. A running stream never switches; after a
+disconnect the policy runs again, so unplugging the cable falls back to Wi-Fi and a Wi-Fi drop falls
+back to USB within about half a second of the sender being reachable. A dead Wi-Fi link (nothing
+received for 3 s although the app pings every 500 ms) also counts as a disconnect.
+
+To pin a sender (only that one is tried; must be an IP address):
 
 ```sh
-adb shell setprop debug.questmirror.host 192.168.1.20   # Mac's IP; "''" to clear
-adb shell setprop debug.questmirror.port 7777
+adb shell setprop debug.questmirror.host 192.168.1.20
+adb shell setprop debug.questmirror.port 7777            # optional, default 7777
+adb shell setprop debug.questmirror.host "''"            # back to automatic
 ```
 
 ## Logs
@@ -51,19 +68,37 @@ adb logcat -s QuestMirror           # follow
 adb logcat -d -b crash              # native crashes
 ```
 
-Besides session/lifecycle transitions it logs `Connected to ...`, every `CONFIG`, the decoder
+Besides session/lifecycle transitions it logs `No sender yet (USB: ... | Wi-Fi: ...)` when that
+changes, `Connected over Wi-Fi 192.168.1.20 (name)`, every `CONFIG`, the decoder
 (`Decoder c2.qti.hevc.decoder configured ...`), Surface resizes, status changes, and once per second:
 
 ```
-Stats: recv 53.2 fps, decoded 53.2 fps, 1.18 Mbit/s, capture->decoded avg 23.0 ms max 47.0 ms,
-       decode avg 8.0 ms max 16.0 ms, rtt 0.60 ms, in decoder 1, c2.qti.hevc.decoder 3840x2160
+Stats: recv 59.9 fps, decoded 59.9 fps, 0.81 Mbit/s, capture->decoded avg 13.5 ms max 86.2 ms,
+       decode avg 3.6 ms max 5.9 ms, rtt 5.19 ms, in decoder 1, c2.qti.hevc.decoder 1920x1080,
+       Wi-Fi 192.168.1.20 (Mac mini)
 ```
 
-- *capture->decoded*: Mac capture time to decoded picture handed to the compositor, via the
-  PING/PONG clock offset. Only meaningful while the screen changes: after a pause, the sender's
-  periodic keyframe re-encodes an old capture, which shows up as seconds of "latency".
+- *capture->decoded*: Mac capture time to the decoded picture being handed to the compositor, via
+  the PING/PONG clock offset. Frames whose capture time is not newer than every earlier one on the
+  connection (keyframes re-encoded from an old capture, after connecting or after a static pause)
+  are left out.
 - *decode*: `queueInputBuffer` to output buffer, i.e. the decoder alone.
 - *in decoder*: frames queued but not yet output.
+
+Measured on this Quest 3 (HEVC, Mac on 5 GHz Wi-Fi, same access point):
+
+| Stream | Link | fps | Mbit/s | capture->decoded avg (max) | decode | RTT |
+| --- | --- | --- | --- | --- | --- | --- |
+| test pattern 1920x1080 | USB | 60.0 | 0.82 | 12.7 ms (48) | 3.7 ms | 0.7 ms |
+| test pattern 1920x1080 | Wi-Fi | 60.0 | 0.80 | 12.8 ms (30) | 3.6 ms | 5.2 ms |
+| test pattern 3840x2160 | USB | 60.0 | 1.64 | 28.4 ms (63) | 7.6 ms | 0.7 ms |
+| test pattern 3840x2160 | Wi-Fi | 59.9 | 1.76 | 26.2 ms (96) | 7.5 ms | 4.2 ms |
+| screen 3840x2160 | USB | 29.9 | 4.85 | 24.9 ms (71) | 8.3 ms | 0.7 ms |
+| screen 3840x2160 | Wi-Fi | 30.0 | 5.48 | 29.7 ms (87) | 8.5 ms | 5.5 ms |
+| screen 1920x1080 | USB | 30.0 | 1.30 | 10.1 ms (51) | 3.9 ms | 0.7 ms |
+| screen 1920x1080 | Wi-Fi | 30.1 | 0.91 | 14.2 ms (67) | 3.8 ms | 5.2 ms |
+
+(10–12 one-second samples each; the screen rows depend on what changed on the Mac at the time.)
 
 ## Controls
 
@@ -110,14 +145,18 @@ Filter modes (`XR_FB_composition_layer_settings`, plus `XR_META_automatic_layer_
 - `screen_source.h` — the seam between the XR shell and the content (`ScreenSource`/`ScreenHost`).
 - `mediacodec_source.{h,cpp}` — the `ScreenSource`: glues the network client to the decoder,
   owns the status text, asks `XrApp` to resize the Surface to the stream size.
-- `stream_client.{h,cpp}` — protocol v1 client on its own thread: connect (TCP_NODELAY), hello
-  check, message parsing (unknown types skipped), PING every 500 ms (5 fast ones after connect,
-  offset from the lowest-RTT of the last 16), `FRAME_ACK` after every batch of consumed frames,
-  reconnect every second.
+- `stream_client.{h,cpp}` — protocol v1 client on its own thread: the USB/Wi-Fi policy above
+  (UDP discovery, last host), numeric-IP connects in 50 ms slices so `stop()` is immediate, hello
+  check, CONFIG validation (1..8192, even), message parsing (unknown types skipped), PING every
+  500 ms (5 fast ones after connect, offset from the lowest-RTT of the last 16), `FRAME_ACK` after
+  every batch of consumed frames, dead-link timeout.
 - `video_decoder.{h,cpp}` — AMediaCodec into the ANativeWindow; `low-latency=1`,
   `vendor.qti-ext-dec-low-latency.enable=1`, `priority=0`; prefers
-  `c2.qti.avc.decoder.low_latency` for H.264; an output thread renders every picture at once.
-- `status_panel.{h,cpp}`, `bitmap_font.{h,cpp}` — CPU-drawn status panel (5x7 bitmap font).
+  `c2.qti.avc.decoder.low_latency` for H.264 and falls back to the default decoder if it rejects
+  the format; an output thread presents every picture at once (`releaseOutputBufferAtTime` with
+  the local clock, not the Mac-clock PTS) and flags fatal codec errors.
+- `status_panel.{h,cpp}`, `bitmap_font.{h,cpp}` — CPU-drawn status panel (5x7 bitmap font; UTF-8
+  is decoded, no-break spaces become spaces, Latin-1 accents are dropped, anything else is `?`).
 
 Design points:
 
@@ -129,10 +168,12 @@ Design points:
   (`onSurfaceDestroyed` → `onSurfaceReady`), then the decoder starts on it. The quad's aspect
   follows.
 - **Not visible → nothing writes.** Leaving VISIBLE closes the connection and releases the codec
-  synchronously before `xrEndSession`; becoming visible reconnects (the sender sends CONFIG and a
-  keyframe on every connect). Decoder errors also reconnect, for the same keyframe.
+  synchronously before `xrEndSession` (measured 2–70 ms); becoming visible reconnects (the sender
+  sends CONFIG and a keyframe on every connect). A failed or restarted decoder also reconnects, for
+  the same keyframe, instead of waiting for one that a static screen would never send.
 - Frames are fed to the decoder from the network thread without an extra queue; frames before
   the first keyframe after a CONFIG are discarded but still acknowledged.
+- The status panel is only drawn on frames where it is submitted.
 
 Runtime facts found on this Quest 3 (runtime "Oculus 209.166.0"):
 

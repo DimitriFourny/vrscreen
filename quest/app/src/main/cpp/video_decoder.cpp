@@ -39,19 +39,11 @@ bool VideoDecoder::start(const StreamConfig& config, ANativeWindow* window, std:
     stop();
     const bool hevc = config.codec == Codec::HEVC;
     const char* mime = hevc ? "video/hevc" : "video/avc";
-    // Qualcomm lists a dedicated low-latency AVC decoder; the HEVC one has no such variant.
-    if (!hevc) codec_ = AMediaCodec_createCodecByName("c2.qti.avc.decoder.low_latency");
-    if (codec_ == nullptr) codec_ = AMediaCodec_createDecoderByType(mime);
-    if (codec_ == nullptr) {
-        *error = std::string("no decoder for ") + mime;
+    const std::vector<uint8_t>& ps = config.parameterSets;
+    const size_t split = hevc ? 0 : secondStartCode(ps);
+    if (!hevc && split == 0) {
+        *error = "H.264 CONFIG without separate SPS and PPS";
         return false;
-    }
-    char* name = nullptr;
-    if (AMediaCodec_getName(codec_, &name) == AMEDIA_OK && name != nullptr) {
-        name_ = name;
-        AMediaCodec_releaseName(codec_, name);
-    } else {
-        name_ = mime;
     }
 
     AMediaFormat* format = AMediaFormat_new();
@@ -59,19 +51,11 @@ bool VideoDecoder::start(const StreamConfig& config, ANativeWindow* window, std:
     AMediaFormat_setInt32(format, AMEDIAFORMAT_KEY_WIDTH, config.width);
     AMediaFormat_setInt32(format, AMEDIAFORMAT_KEY_HEIGHT, config.height);
     // Keyframes of a 4K desktop can reach several hundred KB; leave ample room.
-    AMediaFormat_setInt32(format, AMEDIAFORMAT_KEY_MAX_INPUT_SIZE,
-                          std::max(2 << 20, config.width * config.height / 2));
-    const std::vector<uint8_t>& ps = config.parameterSets;
+    const int64_t inputSize = std::max<int64_t>(2 << 20, int64_t{config.width} * config.height / 2);
+    AMediaFormat_setInt32(format, AMEDIAFORMAT_KEY_MAX_INPUT_SIZE, static_cast<int32_t>(inputSize));
     if (hevc) {
         AMediaFormat_setBuffer(format, "csd-0", ps.data(), ps.size());
     } else {
-        const size_t split = secondStartCode(ps);
-        if (split == 0) {
-            *error = "H.264 CONFIG without separate SPS and PPS";
-            AMediaFormat_delete(format);
-            stop();
-            return false;
-        }
         AMediaFormat_setBuffer(format, "csd-0", ps.data(), split);
         AMediaFormat_setBuffer(format, "csd-1", ps.data() + split, ps.size() - split);
     }
@@ -80,11 +64,31 @@ bool VideoDecoder::start(const StreamConfig& config, ANativeWindow* window, std:
     AMediaFormat_setInt32(format, kVendorLowLatency, lowLatencyRequested);
     AMediaFormat_setInt32(format, AMEDIAFORMAT_KEY_PRIORITY, 0);  // realtime
 
-    media_status_t status = AMediaCodec_configure(codec_, format, window, nullptr, 0);
+    // Qualcomm lists a dedicated low-latency AVC decoder (the HEVC one has no such variant); fall
+    // back to the default decoder for the type if it is missing or rejects the format.
+    media_status_t status = AMEDIA_ERROR_UNKNOWN;
+    for (int attempt = hevc ? 1 : 0; attempt < 2 && codec_ == nullptr; ++attempt) {
+        codec_ = attempt == 0 ? AMediaCodec_createCodecByName("c2.qti.avc.decoder.low_latency")
+                              : AMediaCodec_createDecoderByType(mime);
+        if (codec_ == nullptr) continue;
+        char* name = nullptr;
+        if (AMediaCodec_getName(codec_, &name) == AMEDIA_OK && name != nullptr) {
+            name_ = name;
+            AMediaCodec_releaseName(codec_, name);
+        } else {
+            name_ = mime;
+        }
+        status = AMediaCodec_configure(codec_, format, window, nullptr, 0);
+        if (status != AMEDIA_OK) {
+            LOGW("Decoder %s rejected %s %dx%d (%d)", name_.c_str(), mime, config.width, config.height, status);
+            AMediaCodec_delete(codec_);
+            codec_ = nullptr;
+        }
+    }
     AMediaFormat_delete(format);
-    if (status != AMEDIA_OK) {
-        *error = name_ + " configure failed (" + std::to_string(status) + ")";
-        stop();
+    if (codec_ == nullptr) {
+        *error = std::string("no decoder accepts ") + mime + " " + std::to_string(config.width) + "x" +
+                 std::to_string(config.height) + " (" + std::to_string(status) + ")";
         return false;
     }
 
@@ -110,6 +114,7 @@ bool VideoDecoder::start(const StreamConfig& config, ANativeWindow* window, std:
     }
     renderedTotal_ = 0;
     queuedTotal_ = 0;
+    failed_ = false;
     takeStats();
     running_ = true;
     outputThread_ = std::thread(&VideoDecoder::outputLoop, this);
@@ -130,7 +135,7 @@ void VideoDecoder::stop() {
 }
 
 VideoDecoder::QueueResult VideoDecoder::queue(const EncodedFrame& frame, int64_t timeoutMicros) {
-    if (!running_) return QueueResult::Error;
+    if (!running_ || failed_) return QueueResult::Error;
     const ssize_t index = AMediaCodec_dequeueInputBuffer(codec_, timeoutMicros);
     if (index == AMEDIACODEC_INFO_TRY_AGAIN_LATER) return QueueResult::NoInputBuffer;
     if (index < 0) {
@@ -148,7 +153,7 @@ VideoDecoder::QueueResult VideoDecoder::queue(const EncodedFrame& frame, int64_t
     {
         std::lock_guard<std::mutex> lock(queuedMutex_);
         queued_[queuedNext_++ % queued_.size()] = {static_cast<int64_t>(frame.captureTimeMicros),
-                                                   StreamClient::nowMicros()};
+                                                   StreamClient::nowMicros(), frame.freshCapture};
     }
     const media_status_t status = AMediaCodec_queueInputBuffer(codec_, static_cast<size_t>(index), 0, frame.size,
                                                                frame.captureTimeMicros, 0);
@@ -183,15 +188,12 @@ void VideoDecoder::outputLoop() {
         const ssize_t index = AMediaCodec_dequeueOutputBuffer(codec_, &info, 10'000);
         if (index >= 0) {
             const int64_t now = StreamClient::nowMicros();
-            AMediaCodec_releaseOutputBuffer(codec_, static_cast<size_t>(index), true);  // render now
+            // Present now, on the local clock. Plain releaseOutputBuffer(render=true) would stamp the
+            // buffer with its PTS, i.e. the Mac's capture clock, as the desired present time; a
+            // consumer that honours it could hold buffers that look up to a second in the future.
+            AMediaCodec_releaseOutputBufferAtTime(codec_, static_cast<size_t>(index), now * 1000);
             if (renderedTotal_++ == 0) LOGI("Decoder %s: first picture rendered", name_.c_str());
             ++statRendered_;
-            const int64_t delta = now - info.presentationTimeUs;
-            ++statLatencySamples_;
-            statLatencySum_ += delta;
-            int64_t max = statLatencyMax_.load();
-            while (delta > max && !statLatencyMax_.compare_exchange_weak(max, delta)) {
-            }
             std::lock_guard<std::mutex> lock(queuedMutex_);
             for (QueuedInput& q : queued_) {
                 if (q.pts != info.presentationTimeUs) continue;
@@ -199,6 +201,15 @@ void VideoDecoder::outputLoop() {
                 ++statDecodeSamples_;
                 statDecodeSum_ += decode;
                 statDecodeMax_ = std::max(statDecodeMax_, decode);
+                if (q.freshCapture) {
+                    // Re-encodes of an old capture would report the pause as latency: skip them.
+                    const int64_t delta = now - info.presentationTimeUs;
+                    ++statLatencySamples_;
+                    statLatencySum_ += delta;
+                    int64_t max = statLatencyMax_.load();
+                    while (delta > max && !statLatencyMax_.compare_exchange_weak(max, delta)) {
+                    }
+                }
                 q.pts = -1;
                 break;
             }
@@ -207,8 +218,11 @@ void VideoDecoder::outputLoop() {
             LOGI("Decoder output format: %s", AMediaFormat_toString(format));
             AMediaFormat_delete(format);
         } else if (index != AMEDIACODEC_INFO_TRY_AGAIN_LATER && index != AMEDIACODEC_INFO_OUTPUT_BUFFERS_CHANGED) {
-            LOGE("dequeueOutputBuffer failed: %zd", index);
-            usleep(10'000);
+            // Not one of the informational codes: the codec is in an error state (e.g. reclaimed).
+            // queue() now fails and the stats tick reconnects, which brings a fresh keyframe.
+            LOGE("Decoder %s failed: dequeueOutputBuffer returned %zd", name_.c_str(), index);
+            failed_ = true;
+            return;
         }
     }
 }

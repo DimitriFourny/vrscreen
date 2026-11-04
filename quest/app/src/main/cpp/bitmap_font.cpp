@@ -64,8 +64,12 @@ constexpr Glyph kFont[] = {
     {'#', {0x0A, 0x0A, 0x1F, 0x0A, 0x1F, 0x0A, 0x0A}},
     {'!', {0x04, 0x04, 0x04, 0x04, 0x04, 0x00, 0x04}},
     {'?', {0x0E, 0x11, 0x01, 0x02, 0x04, 0x00, 0x04}},
+    {'\'', {0x04, 0x04, 0x08, 0x00, 0x00, 0x00, 0x00}},
 };
 constexpr uint8_t kUnknownGlyph[7] = {0x1F, 0x11, 0x11, 0x11, 0x11, 0x11, 0x1F};
+
+// U+00C0..U+00FF folded to the closest ASCII character.
+constexpr char kLatin1Fold[] = "AAAAAAACEEEEIIIIDNOOOOOxOUUUUYPsaaaaaaaceeeeiiiidnooooo/ouuuuypy";
 
 const uint8_t* glyphRows(char c) {
     if (c >= 'a' && c <= 'z') c = static_cast<char>(c - 'a' + 'A');
@@ -73,6 +77,48 @@ const uint8_t* glyphRows(char c) {
         if (g.c == c) return g.rows;
     }
     return kUnknownGlyph;
+}
+
+// Decodes one UTF-8 sequence and advances `s`; malformed bytes decode as U+FFFD, one at a time.
+uint32_t nextCodepoint(const char*& s) {
+    const auto* p = reinterpret_cast<const unsigned char*>(s);
+    uint32_t cp = p[0];
+    int extra = 0;
+    if (cp < 0x80) {
+        extra = 0;
+    } else if ((cp & 0xE0) == 0xC0) {
+        cp &= 0x1F;
+        extra = 1;
+    } else if ((cp & 0xF0) == 0xE0) {
+        cp &= 0x0F;
+        extra = 2;
+    } else if ((cp & 0xF8) == 0xF0) {
+        cp &= 0x07;
+        extra = 3;
+    } else {
+        ++s;
+        return 0xFFFD;
+    }
+    for (int i = 1; i <= extra; ++i) {
+        if ((p[i] & 0xC0) != 0x80) {
+            ++s;
+            return 0xFFFD;
+        }
+        cp = (cp << 6) | (p[i] & 0x3F);
+    }
+    s += 1 + extra;
+    return cp;
+}
+
+// What the 5x7 font draws for a codepoint: ASCII as is, no-break space as a space, Latin-1
+// letters without their accents, dashes and quotes as their ASCII cousins, the rest as '?'.
+char fontChar(uint32_t cp) {
+    if (cp >= 0x20 && cp < 0x7F) return static_cast<char>(cp);
+    if (cp == 0xA0 || cp == 0x202F) return ' ';
+    if (cp >= 0xC0 && cp <= 0xFF) return kLatin1Fold[cp - 0xC0];
+    if (cp == 0x2010 || cp == 0x2011 || cp == 0x2013 || cp == 0x2014) return '-';
+    if (cp == 0x2018 || cp == 0x2019) return '\'';
+    return '?';
 }
 
 }  // namespace
@@ -84,12 +130,17 @@ void Canvas::fill(int32_t x, int32_t y, int32_t fw, int32_t fh, uint32_t c) cons
 }
 
 int32_t Canvas::textWidth(const char* s, int32_t scale) {
-    return static_cast<int32_t>(std::strlen(s)) * 6 * scale;
+    int32_t chars = 0;
+    while (*s) {
+        nextCodepoint(s);
+        ++chars;
+    }
+    return chars * 6 * scale;
 }
 
 void Canvas::text(int32_t x, int32_t y, int32_t scale, const char* s, uint32_t fg) const {
-    for (; *s; ++s, x += 6 * scale) {
-        const uint8_t* rows = glyphRows(*s);
+    for (; *s; x += 6 * scale) {
+        const uint8_t* rows = glyphRows(fontChar(nextCodepoint(s)));
         for (int32_t r = 0; r < 7; ++r) {
             for (int32_t col = 0; col < 5; ++col) {
                 if (rows[r] & (0x10 >> col)) fill(x + col * scale, y + r * scale, scale, scale, fg);

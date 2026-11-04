@@ -13,22 +13,34 @@ namespace {
 constexpr int64_t kQueueStallMicros = 1'000'000;
 constexpr auto kSurfaceResizeTimeout = std::chrono::seconds(3);
 
-std::string clip(const std::string& s, size_t max) { return s.size() <= max ? s : s.substr(0, max - 3) + "..."; }
-
-std::string portOf(const std::string& endpoint) {
-    const size_t colon = endpoint.rfind(':');
-    return colon == std::string::npos ? endpoint : endpoint.substr(colon + 1);
+// The status panel fits about 50 characters per line. Cuts on a UTF-8 character boundary.
+std::string clip(const std::string& s, size_t max) {
+    if (s.size() <= max) return s;
+    size_t cut = max - 3;
+    while (cut > 0 && (static_cast<unsigned char>(s[cut]) & 0xC0) == 0x80) --cut;
+    return s.substr(0, cut) + "...";
 }
 
 }  // namespace
 
-MediaCodecSource::MediaCodecSource() : client_(*this) { setStatus("Quest Mirror\nStarting..."); }
+MediaCodecSource::MediaCodecSource(const std::string& filesDir) : client_(*this, filesDir) {
+    setStatus("Quest Mirror\nStarting...");
+}
 
 MediaCodecSource::~MediaCodecSource() {
-    stopping_ = true;
-    surfaceCv_.notify_all();
+    requestStop();
     client_.stop();
     stopDecoder();
+}
+
+void MediaCodecSource::requestStop() {
+    // Under the mutex, so a network thread that just evaluated the wait predicate in
+    // startDecoder() cannot miss the notification and sleep through the resize timeout.
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        stopping_ = true;
+    }
+    surfaceCv_.notify_all();
 }
 
 void MediaCodecSource::onSurfaceReady(ANativeWindow* window, jobject /*surface*/, int32_t width, int32_t height) {
@@ -49,12 +61,13 @@ void MediaCodecSource::onVisible(bool visible) {
         return;
     }
     // Synchronous: once this returns, the codec is released and nothing writes to the Surface.
-    stopping_ = true;
-    surfaceCv_.notify_all();
+    // Every wait on the network thread is sliced (<= 50-100 ms) or woken by stop(), so this is quick.
+    const int64_t start = StreamClient::nowMicros();
+    requestStop();
     client_.stop();
     stopDecoder();
     connected_ = false;
-    LOGI("Stream: stopped (not visible)");
+    LOGI("Stream: stopped (not visible) in %.1f ms", static_cast<double>(StreamClient::nowMicros() - start) / 1000.0);
 }
 
 void MediaCodecSource::onSurfaceDestroyed() {
@@ -65,7 +78,7 @@ void MediaCodecSource::onSurfaceDestroyed() {
 }
 
 bool MediaCodecSource::pictureReady() const {
-    return connected_.load() && decoder_.running() && decoder_.renderedTotal() > 0;
+    return connected_.load() && decoder_.running() && !decoder_.failed() && decoder_.renderedTotal() > 0;
 }
 
 std::string MediaCodecSource::statusText() const {
@@ -85,18 +98,25 @@ void MediaCodecSource::setStatus(const std::string& text) {
     LOGI("Status: %s", oneLine.c_str());
 }
 
-void MediaCodecSource::onConnecting(const std::string& endpoint, const std::string& lastError) {
+void MediaCodecSource::onSearching(const SearchState& state) {
     connected_ = false;
-    endpoint_ = endpoint;
-    std::string text = "Quest Mirror\nWaiting for the Mac on " + endpoint + " ...\nStart quest-mirror-sender on the Mac.\n" +
-                       "USB: adb reverse tcp:" + portOf(endpoint) + " tcp:" + portOf(endpoint);
-    if (!lastError.empty()) text += "\nLast try: " + clip(lastError, 38);
+    std::string text = "Quest Mirror\n";
+    if (!state.overrideEndpoint.empty()) {
+        text += "Connecting to " + state.overrideEndpoint + " ...\n(set by debug.questmirror.host)";
+        if (!state.wifiResult.empty()) text += "\nLast try: " + clip(state.wifiResult, 38);
+    } else {
+        text += "Looking for the Mac over USB and Wi-Fi ...\nStart quest-mirror-sender on the Mac.";
+        if (!state.usbResult.empty()) text += "\nUSB: " + clip(state.usbResult, 43);
+        if (!state.wifiResult.empty()) text += "\nWi-Fi: " + clip(state.wifiResult, 41);
+    }
+    if (!state.lastDisconnect.empty()) text += "\nLost: " + clip(state.lastDisconnect, 42);
     setStatus(text);
 }
 
-void MediaCodecSource::onConnected(const std::string& endpoint) {
+void MediaCodecSource::onConnected(const std::string& transport) {
+    transport_ = transport;
     connected_ = true;
-    setStatus("Quest Mirror\nConnected to " + endpoint + "\nWaiting for video from the Mac...");
+    setStatus("Quest Mirror\nConnected over\n" + clip(transport, 50) + "\nWaiting for video from the Mac...");
 }
 
 bool MediaCodecSource::onConfig(const StreamConfig& config) {
@@ -111,7 +131,7 @@ bool MediaCodecSource::onConfig(const StreamConfig& config) {
     char line[96];
     std::snprintf(line, sizeof(line), "%s %dx%d", config.codec == Codec::HEVC ? "HEVC" : "H.264", config.width,
                   config.height);
-    setStatus("Quest Mirror\nConnected to " + endpoint_ + "\n" + line + " - waiting for a picture...");
+    setStatus("Quest Mirror\nConnected over\n" + clip(transport_, 50) + "\n" + line + " - waiting for a picture...");
     return true;
 }
 
@@ -159,13 +179,12 @@ void MediaCodecSource::stopDecoder() {
 
 bool MediaCodecSource::onFrame(const EncodedFrame& frame) {
     if (!config_.valid()) return true;  // no CONFIG yet: discard
-    if (!decoder_.running()) {
-        // The Surface was recreated under us; restart on the new one from the next keyframe.
-        std::string error;
-        if (!startDecoder(&error)) {
-            LOGE("Decoder restart failed: %s", error.c_str());
-            return false;
-        }
+    if (!decoder_.running() || decoder_.failed()) {
+        // The codec died or the Surface was recreated under us. Reconnect rather than restart in
+        // place: the sender sends CONFIG + a keyframe on connect, while a static screen would
+        // never send the keyframe a restarted decoder needs.
+        LOGW("Decoder not running (%s); reconnecting for a keyframe", decoder_.failed() ? "failed" : "stopped");
+        return false;
     }
     if (waitingForKeyframe_) {
         if (!frame.keyframe) return true;  // discard until a decoder entry point
@@ -195,7 +214,7 @@ void MediaCodecSource::onDisconnected(const std::string& reason) {
     config_ = StreamConfig{};
 }
 
-void MediaCodecSource::onStatsTick(const LinkStats& stats) {
+bool MediaCodecSource::onStatsTick(const LinkStats& stats) {
     const VideoDecoder::Stats d = decoder_.takeStats();
     int64_t offset = 0;
     const bool hasOffset = client_.clockOffset(&offset);
@@ -215,12 +234,14 @@ void MediaCodecSource::onStatsTick(const LinkStats& stats) {
     const uint64_t queued = decoder_.queuedTotal();
     const uint64_t rendered = decoder_.renderedTotal();
     LOGI("Stats: recv %.1f fps, decoded %.1f fps, %.2f Mbit/s, capture->decoded %s, decode %s, rtt %.2f ms, "
-         "in decoder %" PRIu64 ", %s %dx%d",
+         "in decoder %" PRIu64 ", %s %dx%d, %s",
          static_cast<double>(stats.frames) / stats.seconds, static_cast<double>(d.rendered) / stats.seconds,
          static_cast<double>(stats.bytes) * 8.0 / stats.seconds / 1e6, latency, decode,
          stats.rttMicros >= 0 ? static_cast<double>(stats.rttMicros) / 1000.0 : -1.0,
          queued > rendered ? queued - rendered : 0, decoder_.running() ? decoder_.name().c_str() : "no decoder",
-         config_.width, config_.height);
+         config_.width, config_.height, transport_.c_str());
+    // A codec that died while the screen is static would otherwise go unnoticed until the next frame.
+    return !decoder_.failed();
 }
 
 }  // namespace qm

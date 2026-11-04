@@ -761,7 +761,10 @@ void XrApp::renderFrame() {
     if (recenterRequested_ && recenter(frameState.predictedDisplayTime)) recenterRequested_ = false;
 
     const bool picture = source_.pictureReady();
-    if (visible_ && !picture && (!statusDrawn_ || statusDrawnGeneration_ != source_.statusGeneration())) {
+    // Draw only when the panel is submitted this frame: a runtime that consumes buffers only from
+    // composited layers would otherwise fill the queue and block ANativeWindow_lock.
+    const bool statusSubmitted = visible_ && frameState.shouldRender && quadPlaced_ && !picture;
+    if (statusSubmitted && (!statusDrawn_ || statusDrawnGeneration_ != source_.statusGeneration())) {
         const uint64_t generation = source_.statusGeneration();
         statusDrawn_ = statusPanel_.draw(source_.statusText());
         statusDrawnGeneration_ = generation;

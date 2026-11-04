@@ -109,6 +109,12 @@ if (( USB )); then
     say "Headset on USB: $(adb shell getprop ro.product.model 2>/dev/null | tr -d '\r') ($(adb get-serialno))"
     if (( INSTALL )); then
         say "Building the Quest app"
+        # Gradle needs a JDK; shells that don't source ~/.zshrc lack JAVA_HOME.
+        if [[ -z "${JAVA_HOME:-}" ]] && ! /usr/libexec/java_home >/dev/null 2>&1; then
+            jdk="/opt/homebrew/opt/openjdk@17/libexec/openjdk.jdk/Contents/Home"
+            [[ -x "$jdk/bin/java" ]] || die "no JDK found: install one (brew install openjdk@17) or set JAVA_HOME"
+            export JAVA_HOME="$jdk"
+        fi
         (cd "$ROOT/quest" && ./gradlew assembleDebug)
         say "Installing $APK"
         adb install -r "$APK"

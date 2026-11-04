@@ -43,6 +43,8 @@ public:
     QueueResult queue(const EncodedFrame& frame, int64_t timeoutMicros);
 
     bool running() const { return running_.load(); }
+    // The codec hit a fatal error; it needs a restart (and a keyframe) before it decodes again.
+    bool failed() const { return failed_.load(); }
     // Pictures rendered since start(); > 0 means the window shows a decoded picture.
     uint64_t renderedTotal() const { return renderedTotal_.load(); }
     uint64_t queuedTotal() const { return queuedTotal_.load(); }
@@ -56,6 +58,7 @@ private:
     std::string name_;
     std::thread outputThread_;
     std::atomic<bool> running_{false};
+    std::atomic<bool> failed_{false};
     std::atomic<uint64_t> renderedTotal_{0};
     std::atomic<uint64_t> queuedTotal_{0};
     std::atomic<uint64_t> statRendered_{0};
@@ -67,6 +70,7 @@ private:
     struct QueuedInput {
         int64_t pts = -1;
         int64_t queuedAt = 0;
+        bool freshCapture = false;  // counts towards capture -> output latency
     };
     std::mutex queuedMutex_;
     std::array<QueuedInput, 32> queued_{};  // guarded by queuedMutex_, as are the next four

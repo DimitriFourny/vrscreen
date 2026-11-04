@@ -64,7 +64,7 @@ void android_main(android_app* app) {
     app->onAppCmd = onAppCmd;
 
     {
-        qm::MediaCodecSource source;
+        qm::MediaCodecSource source(app->activity->internalDataPath != nullptr ? app->activity->internalDataPath : "");
         qm::XrApp xr(app->activity, env, source);
         bool finishing = false;
         if (!xr.initialize()) {
