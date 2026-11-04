@@ -15,7 +15,11 @@ target_include_directories(native_app_glue PUBLIC ${ANDROID_NDK}/sources/android
 add_library(questmirror SHARED
     main.cpp
     xr_app.cpp
-    test_pattern_source.cpp)
+    status_panel.cpp
+    bitmap_font.cpp
+    stream_client.cpp
+    video_decoder.cpp
+    mediacodec_source.cpp)
 
 target_compile_definitions(questmirror PRIVATE XR_USE_PLATFORM_ANDROID XR_USE_GRAPHICS_API_OPENGL_ES)
 # OpenXR structs are initialised as `T x{XR_TYPE_...}`; the remaining members are zeroed on purpose.
@@ -30,4 +34,5 @@ target_link_libraries(questmirror PRIVATE
     android
     EGL
     GLESv3
+    mediandk
     log)

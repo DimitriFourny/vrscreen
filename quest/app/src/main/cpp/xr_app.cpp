@@ -5,11 +5,13 @@
 
 #include <GLES3/gl3.h>
 #include <android/native_window_jni.h>
+#include <sys/stat.h>
 #include <sys/system_properties.h>
 
 #include <algorithm>
 #include <cinttypes>
 #include <cmath>
+#include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <vector>
@@ -51,6 +53,25 @@ constexpr int32_t kDefaultFilterMode = 2;  // sharpen-quality
 
 constexpr const char* kFilterProperty = "debug.questmirror.filter";
 constexpr const char* kRecenterProperty = "debug.questmirror.recenter";
+constexpr const char* kDistanceProperty = "debug.questmirror.distance";
+constexpr const char* kWidthProperty = "debug.questmirror.width";
+
+// Initial screen Surface size; the stream's CONFIG resizes it.
+constexpr int32_t kInitialSurfaceWidth = 1920;
+constexpr int32_t kInitialSurfaceHeight = 1080;
+
+constexpr float kMinDistance = 0.5f, kMaxDistance = 3.0f;
+constexpr float kMinWidth = 0.5f, kMaxWidth = 5.0f;
+constexpr float kStatusWidthFraction = 0.6f;  // status panel width relative to the screen width
+constexpr float kStickDeadzone = 0.25f;
+constexpr float kDistanceSpeed = 0.8f;  // m/s at full deflection
+constexpr float kWidthDoublingsPerSecond = 0.7f;
+
+// Android Surface buffers are top-row-first while the runtime samples Android-surface swapchains
+// with the GL bottom-left origin, which shows them upside down; XR_FB_composition_layer_image_layout
+// flips them back. Measured with screencaps for both CPU (ANativeWindow_lock) and MediaCodec output.
+constexpr bool kScreenVerticalFlip = true;
+constexpr bool kStatusVerticalFlip = true;
 
 const char* sessionStateName(XrSessionState state) {
     switch (state) {
@@ -97,8 +118,14 @@ bool loadFunction(XrInstance instance, const char* name, Pfn* out) {
 
 }  // namespace
 
-XrApp::XrApp(ANativeActivity* activity, JNIEnv* env, ScreenSource& source, const QuadConfig& quad)
-    : activity_(activity), env_(env), source_(source), quadConfig_(quad) {}
+XrApp::XrApp(ANativeActivity* activity, JNIEnv* env, ScreenSource& source)
+    : activity_(activity), env_(env), source_(source) {
+    source_.attachHost(*this);
+    if (activity_->internalDataPath != nullptr) {
+        mkdir(activity_->internalDataPath, 0700);
+        placementPath_ = std::string(activity_->internalDataPath) + "/placement.txt";
+    }
+}
 
 XrApp::~XrApp() { shutdown(); }
 
@@ -117,8 +144,22 @@ std::string XrApp::pathString(XrPath path) const {
 }
 
 bool XrApp::initialize() {
-    return createInstance() && initSystem() && initEgl() && createSession() && createActions() &&
-           createPassthrough() && createQuadSwapchain();
+    loadPlacement();
+    if (!(createInstance() && initSystem() && initEgl() && createSession() && createActions() &&
+          createPassthrough())) {
+        return false;
+    }
+    setFilterMode(hasLayerSettings_ ? kDefaultFilterMode : 0, "default");
+    lastRecenterProp_ = readProperty(kRecenterProperty);
+    lastDistanceProp_ = readProperty(kDistanceProperty);
+    lastWidthProp_ = readProperty(kWidthProperty);
+    lastFilterProp_ = readProperty(kFilterProperty);
+    if (!lastFilterProp_.empty()) setFilterMode(std::atoi(lastFilterProp_.c_str()), kFilterProperty);
+
+    if (!createSurfaceSwapchain(StatusPanel::kWidth, StatusPanel::kHeight, &status_)) return false;
+    statusPanel_.attach(status_.window);
+    LOGI("Status panel swapchain created: %dx%d", status_.width, status_.height);
+    return createScreenSwapchain(kInitialSurfaceWidth, kInitialSurfaceHeight);
 }
 
 bool XrApp::createInstance() {
@@ -274,6 +315,10 @@ bool XrApp::createActions() {
     std::strcpy(actionInfo.actionName, "cycle_filter");
     std::strcpy(actionInfo.localizedActionName, "Cycle screen filter");
     XR_CHECK(xrCreateAction(actionSet_, &actionInfo, &filterAction_));
+    actionInfo.actionType = XR_ACTION_TYPE_VECTOR2F_INPUT;
+    std::strcpy(actionInfo.actionName, "adjust_screen");
+    std::strcpy(actionInfo.localizedActionName, "Screen distance and size");
+    XR_CHECK(xrCreateAction(actionSet_, &actionInfo, &adjustAction_));
 
     auto path = [this](const char* s) {
         XrPath p = XR_NULL_PATH;
@@ -285,6 +330,7 @@ bool XrApp::createActions() {
         {recenterAction_, path("/user/hand/left/input/x/click")},
         {filterAction_, path("/user/hand/right/input/b/click")},
         {filterAction_, path("/user/hand/left/input/y/click")},
+        {adjustAction_, path("/user/hand/right/input/thumbstick")},
     };
     XrInteractionProfileSuggestedBinding suggested{XR_TYPE_INTERACTION_PROFILE_SUGGESTED_BINDING};
     suggested.interactionProfile = path("/interaction_profiles/oculus/touch_controller");
@@ -313,65 +359,93 @@ bool XrApp::createPassthrough() {
     return true;
 }
 
-bool XrApp::createQuadSwapchain() {
+bool XrApp::createSurfaceSwapchain(int32_t width, int32_t height, SurfaceSwapchain* out) {
     // XR_KHR_android_surface_swapchain: format, sampleCount, faceCount, arraySize and mipCount must
-    // be zero; the Surface producer defines the pixel format (and may change the size).
+    // be zero; the Surface producer defines the pixel format.
     XrSwapchainCreateInfo createInfo{XR_TYPE_SWAPCHAIN_CREATE_INFO};
     createInfo.usageFlags = XR_SWAPCHAIN_USAGE_SAMPLED_BIT | XR_SWAPCHAIN_USAGE_COLOR_ATTACHMENT_BIT;
-    createInfo.width = static_cast<uint32_t>(quadConfig_.surfaceWidth);
-    createInfo.height = static_cast<uint32_t>(quadConfig_.surfaceHeight);
+    createInfo.width = static_cast<uint32_t>(width);
+    createInfo.height = static_cast<uint32_t>(height);
     jobject surface = nullptr;
-    XR_CHECK(pfnCreateSwapchainAndroidSurfaceKHR(session_, &createInfo, &quadSwapchain_, &surface));
+    XR_CHECK(pfnCreateSwapchainAndroidSurfaceKHR(session_, &createInfo, &out->swapchain, &surface));
     if (surface == nullptr) {
         LOGE("xrCreateSwapchainAndroidSurfaceKHR returned no Surface");
         return false;
     }
-    quadSurface_ = env_->NewGlobalRef(surface);
-    quadWindow_ = ANativeWindow_fromSurface(env_, quadSurface_);
-    if (quadWindow_ == nullptr) {
+    out->surface = env_->NewGlobalRef(surface);
+    out->window = ANativeWindow_fromSurface(env_, out->surface);
+    out->width = width;
+    out->height = height;
+    if (out->window == nullptr) {
         LOGE("ANativeWindow_fromSurface failed");
         return false;
     }
-    LOGI("Surface swapchain created: %dx%d, quad %.2fm wide at %.2fm", quadConfig_.surfaceWidth,
-         quadConfig_.surfaceHeight, quadConfig_.widthMeters, quadConfig_.distanceMeters);
-
-    setFilterMode(hasLayerSettings_ ? kDefaultFilterMode : 0, "default");
-    lastRecenterProp_ = readProperty(kRecenterProperty);
-    lastFilterProp_ = readProperty(kFilterProperty);
-    if (!lastFilterProp_.empty()) setFilterMode(std::atoi(lastFilterProp_.c_str()), kFilterProperty);
-
-    source_.onSurfaceReady(quadWindow_, quadSurface_, quadConfig_.surfaceWidth, quadConfig_.surfaceHeight);
-    if (visible_) source_.onVisible(true);
     return true;
 }
 
-void XrApp::destroyQuadSwapchain() {
-    if (quadSwapchain_ == XR_NULL_HANDLE) return;
-    if (quadWindow_ != nullptr) source_.onSurfaceDestroyed();
-    if (quadWindow_ != nullptr) {
-        ANativeWindow_release(quadWindow_);
-        quadWindow_ = nullptr;
+void XrApp::destroySurfaceSwapchain(SurfaceSwapchain* sc) {
+    if (sc->window != nullptr) ANativeWindow_release(sc->window);
+    if (sc->surface != nullptr) env_->DeleteGlobalRef(sc->surface);
+    if (sc->swapchain != XR_NULL_HANDLE) xrDestroySwapchain(sc->swapchain);
+    *sc = SurfaceSwapchain{};
+}
+
+bool XrApp::createScreenSwapchain(int32_t width, int32_t height) {
+    if (!createSurfaceSwapchain(width, height, &screen_)) {
+        destroySurfaceSwapchain(&screen_);
+        return false;
     }
-    if (quadSurface_ != nullptr) {
-        env_->DeleteGlobalRef(quadSurface_);
-        quadSurface_ = nullptr;
+    LOGI("Screen surface swapchain created: %dx%d", width, height);
+    source_.onSurfaceReady(screen_.window, screen_.surface, width, height);
+    return true;
+}
+
+void XrApp::destroyScreenSwapchain() {
+    if (screen_.swapchain == XR_NULL_HANDLE) return;
+    source_.onSurfaceDestroyed();
+    destroySurfaceSwapchain(&screen_);
+    LOGI("Screen surface swapchain destroyed");
+}
+
+void XrApp::requestSurfaceSize(int32_t width, int32_t height) {
+    std::lock_guard<std::mutex> lock(resizeMutex_);
+    requestedWidth_ = width;
+    requestedHeight_ = height;
+}
+
+void XrApp::applySurfaceResize() {
+    int32_t width, height;
+    {
+        std::lock_guard<std::mutex> lock(resizeMutex_);
+        width = requestedWidth_;
+        height = requestedHeight_;
+        requestedWidth_ = requestedHeight_ = 0;
     }
-    xrDestroySwapchain(quadSwapchain_);
-    quadSwapchain_ = XR_NULL_HANDLE;
-    LOGI("Surface swapchain destroyed");
+    if (width <= 0 || height <= 0 || session_ == XR_NULL_HANDLE) return;
+    if (width == screen_.width && height == screen_.height) return;  // the source sees the size already
+    LOGI("Resizing the screen Surface %dx%d -> %dx%d", screen_.width, screen_.height, width, height);
+    destroyScreenSwapchain();
+    if (!createScreenSwapchain(width, height)) LOGE("Screen swapchain recreation failed");
 }
 
 void XrApp::shutdown() {
     if (instance_ == XR_NULL_HANDLE && eglDisplay_ == EGL_NO_DISPLAY) return;
     LOGI("Shutting down (session state %s, running %d)", sessionStateName(sessionState_), sessionRunning_);
-    destroyQuadSwapchain();
+    if (visible_) {
+        visible_ = false;
+        source_.onVisible(false);
+    }
+    if (placementDirty_) savePlacement();
+    destroyScreenSwapchain();
+    statusPanel_.detach();
+    destroySurfaceSwapchain(&status_);
     if (passthroughLayer_ != XR_NULL_HANDLE) pfnDestroyPassthroughLayerFB(passthroughLayer_);
     passthroughLayer_ = XR_NULL_HANDLE;
     if (passthrough_ != XR_NULL_HANDLE) pfnDestroyPassthroughFB(passthrough_);
     passthrough_ = XR_NULL_HANDLE;
     if (actionSet_ != XR_NULL_HANDLE) xrDestroyActionSet(actionSet_);
     actionSet_ = XR_NULL_HANDLE;
-    recenterAction_ = filterAction_ = XR_NULL_HANDLE;
+    recenterAction_ = filterAction_ = adjustAction_ = XR_NULL_HANDLE;
     if (viewSpace_ != XR_NULL_HANDLE) xrDestroySpace(viewSpace_);
     viewSpace_ = XR_NULL_HANDLE;
     if (localSpace_ != XR_NULL_HANDLE) xrDestroySpace(localSpace_);
@@ -432,6 +506,7 @@ void XrApp::pollEvents() {
         }
         event = {XR_TYPE_EVENT_DATA_BUFFER};
     }
+    applySurfaceResize();
 }
 
 void XrApp::handleSessionStateChanged(const XrEventDataSessionStateChanged& event) {
@@ -470,8 +545,9 @@ void XrApp::updateVisibility() {
                          (sessionState_ == XR_SESSION_STATE_VISIBLE || sessionState_ == XR_SESSION_STATE_FOCUSED);
     if (visible == visible_) return;
     visible_ = visible;
-    LOGI("Content %s", visible ? "visible: resuming screen source" : "hidden: pausing screen source");
-    if (quadWindow_ != nullptr) source_.onVisible(visible);
+    LOGI("Content %s", visible ? "visible: starting screen source" : "hidden: stopping screen source");
+    statusDrawn_ = false;  // redraw the status panel once visible again
+    source_.onVisible(visible);
 }
 
 void XrApp::logInteractionProfiles() {
@@ -485,7 +561,7 @@ void XrApp::logInteractionProfiles() {
     }
 }
 
-void XrApp::pollInput() {
+void XrApp::pollInput(double dtSeconds) {
     if (sessionState_ != XR_SESSION_STATE_FOCUSED) return;
     XrActiveActionSet active{actionSet_, XR_NULL_PATH};
     XrActionsSyncInfo syncInfo{XR_TYPE_ACTIONS_SYNC_INFO};
@@ -505,6 +581,23 @@ void XrApp::pollInput() {
         recenterRequested_ = true;
     }
     if (pressed(filterAction_)) cycleFilterMode();
+
+    // Right thumbstick: Y moves the screen nearer/farther, X shrinks/grows it.
+    XrActionStateGetInfo getInfo{XR_TYPE_ACTION_STATE_GET_INFO};
+    getInfo.action = adjustAction_;
+    XrActionStateVector2f stick{XR_TYPE_ACTION_STATE_VECTOR2F};
+    if (XR_FAILED(xrGetActionStateVector2f(session_, &getInfo, &stick)) || !stick.isActive) return;
+    auto deadzone = [](float v) {
+        const float a = std::fabs(v);
+        return a < kStickDeadzone ? 0.0f : std::copysign((a - kStickDeadzone) / (1.0f - kStickDeadzone), v);
+    };
+    const float x = deadzone(stick.currentState.x);
+    const float y = deadzone(stick.currentState.y);
+    if (x == 0.0f && y == 0.0f) return;
+    const float dt = static_cast<float>(dtSeconds);
+    setPlacement(placement_.distance + y * kDistanceSpeed * dt,
+                 placement_.width * std::exp2(x * kWidthDoublingsPerSecond * dt), nullptr);
+    placementIdleSeconds_ = 0;
 }
 
 void XrApp::pollDebugProperties() {
@@ -519,6 +612,58 @@ void XrApp::pollDebugProperties() {
         lastFilterProp_ = filter;
         if (!filter.empty()) setFilterMode(std::atoi(filter.c_str()), kFilterProperty);
     }
+    const std::string distance = readProperty(kDistanceProperty);
+    if (distance != lastDistanceProp_) {
+        lastDistanceProp_ = distance;
+        if (!distance.empty()) setPlacement(std::strtof(distance.c_str(), nullptr), placement_.width, kDistanceProperty);
+    }
+    const std::string width = readProperty(kWidthProperty);
+    if (width != lastWidthProp_) {
+        lastWidthProp_ = width;
+        if (!width.empty()) setPlacement(placement_.distance, std::strtof(width.c_str(), nullptr), kWidthProperty);
+    }
+}
+
+void XrApp::setPlacement(float distance, float width, const char* reason) {
+    placement_.distance = std::clamp(distance, kMinDistance, kMaxDistance);
+    placement_.width = std::clamp(width, kMinWidth, kMaxWidth);
+    placementDirty_ = true;
+    updateQuadPose();
+    if (reason != nullptr) {
+        LOGI("Placement: %.2f m wide at %.2f m (%s)", placement_.width, placement_.distance, reason);
+        savePlacement();
+    }
+}
+
+void XrApp::loadPlacement() {
+    if (placementPath_.empty()) return;
+    FILE* f = std::fopen(placementPath_.c_str(), "r");
+    if (f == nullptr) {
+        LOGI("Placement: default %.2f m wide at %.2f m (no %s yet)", placement_.width, placement_.distance,
+             placementPath_.c_str());
+        return;
+    }
+    float distance = 0, width = 0;
+    if (std::fscanf(f, "%f %f", &distance, &width) == 2) {
+        placement_.distance = std::clamp(distance, kMinDistance, kMaxDistance);
+        placement_.width = std::clamp(width, kMinWidth, kMaxWidth);
+    }
+    std::fclose(f);
+    LOGI("Placement: %.2f m wide at %.2f m (loaded from %s)", placement_.width, placement_.distance,
+         placementPath_.c_str());
+}
+
+void XrApp::savePlacement() {
+    placementDirty_ = false;
+    if (placementPath_.empty()) return;
+    FILE* f = std::fopen(placementPath_.c_str(), "w");
+    if (f == nullptr) {
+        LOGW("Placement: cannot write %s", placementPath_.c_str());
+        return;
+    }
+    std::fprintf(f, "%.3f %.3f\n", placement_.distance, placement_.width);
+    std::fclose(f);
+    LOGI("Placement saved: %.2f m wide at %.2f m", placement_.width, placement_.distance);
 }
 
 bool XrApp::filterModeSupported(int32_t mode) const {
@@ -564,16 +709,23 @@ bool XrApp::recenter(XrTime time) {
         fx /= len;
         fz /= len;
     }
-    // The quad is visible from its +Z side, so rotate +Z onto -forward (towards the viewer).
-    const float yaw = std::atan2(-fx, -fz);
-    quadPose_.orientation = {0.0f, std::sin(yaw / 2.0f), 0.0f, std::cos(yaw / 2.0f)};
-    quadPose_.position = {head.pose.position.x + fx * quadConfig_.distanceMeters, head.pose.position.y,
-                          head.pose.position.z + fz * quadConfig_.distanceMeters};
+    anchorPosition_ = head.pose.position;
+    anchorForwardX_ = fx;
+    anchorForwardZ_ = fz;
     quadPlaced_ = true;
-    LOGI("Quad placed at (%.2f, %.2f, %.2f) yaw %.1f deg; head at (%.2f, %.2f, %.2f)", quadPose_.position.x,
-         quadPose_.position.y, quadPose_.position.z, yaw * 57.29578f, head.pose.position.x, head.pose.position.y,
-         head.pose.position.z);
+    updateQuadPose();
+    LOGI("Screen placed at (%.2f, %.2f, %.2f), %.2f m wide at %.2f m; head at (%.2f, %.2f, %.2f)",
+         quadPose_.position.x, quadPose_.position.y, quadPose_.position.z, placement_.width, placement_.distance,
+         head.pose.position.x, head.pose.position.y, head.pose.position.z);
     return true;
+}
+
+void XrApp::updateQuadPose() {
+    // The quad is visible from its +Z side, so rotate +Z onto -forward (towards the viewer).
+    const float yaw = std::atan2(-anchorForwardX_, -anchorForwardZ_);
+    quadPose_.orientation = {0.0f, std::sin(yaw / 2.0f), 0.0f, std::cos(yaw / 2.0f)};
+    quadPose_.position = {anchorPosition_.x + anchorForwardX_ * placement_.distance, anchorPosition_.y,
+                          anchorPosition_.z + anchorForwardZ_ * placement_.distance};
 }
 
 void XrApp::renderFrame() {
@@ -591,13 +743,29 @@ void XrApp::renderFrame() {
         return;
     }
 
-    pollInput();
+    const double dt = lastDisplayTime_ == 0
+                          ? 0.0
+                          : std::min(0.1, static_cast<double>(frameState.predictedDisplayTime - lastDisplayTime_) / 1e9);
+    lastDisplayTime_ = frameState.predictedDisplayTime;
+    pollInput(dt);
     if (frameIndex_ % 36 == 0) pollDebugProperties();
+    if (placementDirty_) {
+        // Persist once the thumbstick has been released for half a second.
+        placementIdleSeconds_ += dt;
+        if (placementIdleSeconds_ > 0.5) savePlacement();
+    }
     if (recenterAtTime_ != 0 && frameState.predictedDisplayTime >= recenterAtTime_) {
         recenterRequested_ = true;
         recenterAtTime_ = 0;
     }
     if (recenterRequested_ && recenter(frameState.predictedDisplayTime)) recenterRequested_ = false;
+
+    const bool picture = source_.pictureReady();
+    if (visible_ && !picture && (!statusDrawn_ || statusDrawnGeneration_ != source_.statusGeneration())) {
+        const uint64_t generation = source_.statusGeneration();
+        statusDrawn_ = statusPanel_.draw(source_.statusText());
+        statusDrawnGeneration_ = generation;
+    }
 
     XrCompositionLayerPassthroughFB passthroughLayer{XR_TYPE_COMPOSITION_LAYER_PASSTHROUGH_FB};
     passthroughLayer.flags = XR_COMPOSITION_LAYER_BLEND_TEXTURE_SOURCE_ALPHA_BIT;
@@ -606,36 +774,37 @@ void XrApp::renderFrame() {
 
     XrCompositionLayerSettingsFB settings{XR_TYPE_COMPOSITION_LAYER_SETTINGS_FB};
     settings.layerFlags = kFilterModes[filterMode_].flags;
-
-    // Android Surface buffers are top-row-first while the runtime samples the swapchain with the GL
-    // bottom-left origin, which shows the Surface upside down; flip it back in the compositor.
     XrCompositionLayerImageLayoutFB imageLayout{XR_TYPE_COMPOSITION_LAYER_IMAGE_LAYOUT_FB};
     imageLayout.flags = XR_COMPOSITION_LAYER_IMAGE_LAYOUT_VERTICAL_FLIP_BIT_FB;
 
-    const void* quadChain = nullptr;
-    if (settings.layerFlags != 0) quadChain = &settings;
-    if (hasImageLayout_) {
-        imageLayout.next = const_cast<void*>(quadChain);
-        quadChain = &imageLayout;
+    // Either the screen (once the source shows a picture) or the status panel, same pose.
+    const SurfaceSwapchain& shown = picture ? screen_ : status_;
+    const bool flip = picture ? kScreenVerticalFlip : kStatusVerticalFlip;
+    const void* chain = nullptr;
+    if (settings.layerFlags != 0) chain = &settings;
+    if (hasImageLayout_ && flip) {
+        imageLayout.next = const_cast<void*>(chain);
+        chain = &imageLayout;
     }
+    const float width = picture ? placement_.width : placement_.width * kStatusWidthFraction;
 
     XrCompositionLayerQuad quad{XR_TYPE_COMPOSITION_LAYER_QUAD};
-    quad.next = quadChain;
+    quad.next = chain;
     quad.layerFlags = 0;  // opaque
     quad.space = localSpace_;
     quad.eyeVisibility = XR_EYE_VISIBILITY_BOTH;
-    quad.subImage.swapchain = quadSwapchain_;
-    quad.subImage.imageRect = {{0, 0}, {quadConfig_.surfaceWidth, quadConfig_.surfaceHeight}};
+    quad.subImage.swapchain = shown.swapchain;
+    quad.subImage.imageRect = {{0, 0}, {shown.width, shown.height}};
     quad.subImage.imageArrayIndex = 0;
     quad.pose = quadPose_;
-    quad.size = {quadConfig_.widthMeters, quadConfig_.widthMeters * static_cast<float>(quadConfig_.surfaceHeight) /
-                                              static_cast<float>(quadConfig_.surfaceWidth)};
+    quad.size = {width, width * static_cast<float>(shown.height) / static_cast<float>(std::max(shown.width, 1))};
 
     const XrCompositionLayerBaseHeader* layers[2];
     uint32_t layerCount = 0;
     if (frameState.shouldRender && visible_) {
         layers[layerCount++] = reinterpret_cast<const XrCompositionLayerBaseHeader*>(&passthroughLayer);
-        if (quadPlaced_) layers[layerCount++] = reinterpret_cast<const XrCompositionLayerBaseHeader*>(&quad);
+        const bool showQuad = quadPlaced_ && shown.swapchain != XR_NULL_HANDLE && (picture || statusDrawn_);
+        if (showQuad) layers[layerCount++] = reinterpret_cast<const XrCompositionLayerBaseHeader*>(&quad);
     }
 
     XrFrameEndInfo endInfo{XR_TYPE_FRAME_END_INFO};
@@ -646,12 +815,12 @@ void XrApp::renderFrame() {
     r = xrEndFrame(session_, &endInfo);
     if (XR_FAILED(r)) LOGE("xrEndFrame (%u layers): %s", layerCount, resultString(r).c_str());
 
-    if (layerCount == 2 && framesWithContent_++ == 0) {
-        LOGI("First frame submitted with passthrough + quad layers");
+    if (picture && layerCount == 2 && framesWithPicture_++ == 0) {
+        LOGI("First frame submitted with passthrough + screen layers");
     }
     if (++frameIndex_ % 720 == 0) {
-        LOGI("Frame loop: %" PRIu64 " frames, %" PRIu64 " with content, period %.1f ms", frameIndex_,
-             framesWithContent_, static_cast<double>(frameState.predictedDisplayPeriod) / 1e6);
+        LOGI("Frame loop: %" PRIu64 " frames, %" PRIu64 " with the screen, period %.1f ms", frameIndex_,
+             framesWithPicture_, static_cast<double>(frameState.predictedDisplayPeriod) / 1e6);
     }
 }
 

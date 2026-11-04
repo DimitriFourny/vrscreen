@@ -1,8 +1,9 @@
 // Quest Mirror: native OpenXR app (NativeActivity + android_native_app_glue).
-// Milestone 2: passthrough + a world-locked Android-surface quad fed by a CPU test pattern.
+// Mirrors the Mac's screen: TCP stream from quest-mirror-sender, decoded with MediaCodec straight
+// into a world-locked Android-surface quad over passthrough.
 
 #include "log.h"
-#include "test_pattern_source.h"
+#include "mediacodec_source.h"
 #include "xr_app.h"
 
 #include <android_native_app_glue.h>
@@ -63,8 +64,8 @@ void android_main(android_app* app) {
     app->onAppCmd = onAppCmd;
 
     {
-        qm::TestPatternSource source;
-        qm::XrApp xr(app->activity, env, source, qm::QuadConfig{});
+        qm::MediaCodecSource source;
+        qm::XrApp xr(app->activity, env, source);
         bool finishing = false;
         if (!xr.initialize()) {
             LOGE("OpenXR initialisation failed; finishing activity");
