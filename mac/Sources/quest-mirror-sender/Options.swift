@@ -17,6 +17,9 @@ struct SenderOptions {
     var maxFramesInFlight = 3
     var width = 1920
     var height = 1080
+    var hotkeys = true
+    /// CONTROL commands sent to every client right after it connects (testing).
+    var controlOnConnect: [ControlCommand] = []
 
     static let usage = """
     Usage: quest-mirror-sender [options]
@@ -36,6 +39,10 @@ struct SenderOptions {
       --max-in-flight N        For clients that send FRAME_ACK: max frames sent but
                                not yet consumed by the client (default 3).
       --width N --height N     Test source size (default 1920x1080).
+      --no-hotkeys             Do not register the global ⌃⌥⌘ screen-placement shortcuts.
+      --debug-control-on-connect SPEC
+                               Testing: send these CONTROL commands to each client on
+                               connect, e.g. "move:1,0;distance:-2;size:1;recenter;reset".
       -h, --help               Show this help.
     """
 
@@ -85,6 +92,8 @@ struct SenderOptions {
             case "--max-in-flight": o.maxFramesInFlight = try int(arg)
             case "--width": o.width = try int(arg, min: 16) & ~1
             case "--height": o.height = try int(arg, min: 16) & ~1
+            case "--no-hotkeys": o.hotkeys = false
+            case "--debug-control-on-connect": o.controlOnConnect = try parseControlSpec(try value(arg))
             case "-h", "--help":
                 print(usage)
                 exit(0)
@@ -93,6 +102,31 @@ struct SenderOptions {
             }
         }
         return o
+    }
+
+    /// Parses `cmd[:args];...` with cmd one of recenter, reset, move:DX,DY,
+    /// distance:STEPS, size:STEPS (values -128...127).
+    static func parseControlSpec(_ spec: String) throws -> [ControlCommand] {
+        try spec.split(separator: ";").map { item in
+            let parts = item.trimmingCharacters(in: .whitespaces).split(separator: ":", maxSplits: 1)
+            let name = parts.first.map { $0.lowercased() } ?? ""
+            let args = parts.count > 1 ? parts[1].split(separator: ",").map { $0.trimmingCharacters(in: .whitespaces) } : []
+            func steps(_ count: Int) throws -> [Int8] {
+                let values = args.compactMap { Int8($0) }
+                guard args.count == count, values.count == count else {
+                    throw OptionError("--debug-control-on-connect: '\(item)' needs \(count) integer argument(s) in -128...127")
+                }
+                return values
+            }
+            switch name {
+            case "recenter": _ = try steps(0); return .recenter
+            case "reset": _ = try steps(0); return .reset
+            case "move": let v = try steps(2); return .move(dx: v[0], dy: v[1])
+            case "distance": return .distance(steps: try steps(1)[0])
+            case "size": return .size(steps: try steps(1)[0])
+            default: throw OptionError("--debug-control-on-connect: unknown command '\(name)'")
+            }
+        }
     }
 }
 

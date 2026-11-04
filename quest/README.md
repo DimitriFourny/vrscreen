@@ -104,14 +104,27 @@ Measured on this Quest 3 (HEVC, Mac on 5 GHz Wi-Fi, same access point):
 
 | Input | Action |
 | --- | --- |
-| **A** (right controller) or **X** (left) | Recenter: screen in front of where you are looking (yaw only, at eye height) |
-| Right thumbstick up / down | Screen farther / nearer (0.5–3 m) |
+| **Grip** (squeeze, right or left controller) | Grab the screen: while held it follows the controller rigidly (move the hand to carry it, turn the wrist to swing it), staying upright and turned towards your head; let go and it stays there |
+| **A** (right controller) or **X** (left) | Recenter: screen in front of where you are looking, same distance, size and height offset |
+| Right thumbstick up / down | Screen farther / nearer (0.5–3 m), along the line from your head to the screen |
 | Right thumbstick right / left | Screen larger / smaller (0.5–5 m wide) |
-| **B** (right) or **Y** (left) | Cycle the screen's compositor filter (see below) |
 | Hold the Meta button (system recenter) | The app re-places the screen in front of you |
 
-Default: 1.8 m wide at 1.2 m. Distance and width are saved to the app's files dir
-(`files/placement.txt`) half a second after the stick is released and restored at launch.
+From the Mac (sender hotkeys, sent as protocol `CONTROL` messages; see `../mac/README.md`):
+⌃⌥⌘ + arrows orbit the screen around your head in 5° steps, ⇧↑/⇧↓ distance ×1.1 / ÷1.1,
+⇧→/⇧← size ×1.1 / ÷1.1, R recenter, 0 reset to 1.8 m wide at 1.2 m in front of you.
+
+Orientation: the screen always faces your head (yaw, and pitch when it sits above or below eye
+height) and never rolls, so it stays upright. While grabbed it turns towards your current head
+position; it ignores the thumbstick, A/X and Mac commands until released (one grabber at a time;
+the first grip wins).
+
+What is saved (`files/placement.txt`, as `distance width heightOffset`): distance from the eyes,
+width, and how far the centre sits above or below eye height. They are written when you release a
+grab, half a second after the thumbstick, and after every Mac command. The OpenXR LOCAL space
+changes every session, so an absolute pose is not stored: at launch (and on recenter) the screen
+goes in front of where you look, at the saved distance, width and height offset.
+Default: 1.8 m wide at 1.2 m, at eye height.
 
 Debug equivalents over adb (polled about twice a second; handy with the headset on the desk):
 
@@ -119,12 +132,15 @@ Debug equivalents over adb (polled about twice a second; handy with the headset 
 adb shell setprop debug.questmirror.recenter $RANDOM   # any new value recenters
 adb shell setprop debug.questmirror.distance 1.5       # metres (saved like the thumbstick)
 adb shell setprop debug.questmirror.width 2.0          # metres (saved like the thumbstick)
-adb shell setprop debug.questmirror.filter 2           # filter mode (also applied at startup)
+adb shell "setprop debug.questmirror.simgrab '0.3 0.2 0 45'"  # simulated grab: the grabber starts
+                                                       # at the head, moves by (x, y, z) m, turns 45° left
+adb shell setprop debug.questmirror.filter 2           # compositor filter mode (default 2)
 adb shell setprop debug.questmirror.lowlatency 0       # A/B: decoder without low-latency keys
 adb shell setprop debug.questmirror.filter "''"        # clear any of these
 ```
 
-Filter modes (`XR_FB_composition_layer_settings`, plus `XR_META_automatic_layer_filter` for 6):
+Filter modes (`XR_FB_composition_layer_settings`, plus `XR_META_automatic_layer_filter` for 6),
+only settable through the prop since quality sharpening looked best in the headset:
 
 | Mode | Flags |
 | --- | --- |
@@ -141,15 +157,21 @@ Filter modes (`XR_FB_composition_layer_settings`, plus `XR_META_automatic_layer_
 - `main.cpp` — `android_main`: Android lifecycle (native_app_glue) and the frame loop.
 - `xr_app.{h,cpp}` — OpenXR instance/session state machine, EGL context for the GLES binding,
   passthrough layer, the two Android-surface swapchains (screen + status panel), Surface resizes,
-  input, placement and layer filtering.
-- `screen_source.h` — the seam between the XR shell and the content (`ScreenSource`/`ScreenHost`).
+  input (A/X, grips, thumbstick), placement (anchor = head position, unit direction, distance;
+  Mac `CONTROL` commands queued from the network thread) and layer filtering.
+- `grab.{h,cpp}` — `Grab`: per-frame `update(pressed, grabberPose, allowStart, &position)`; keeps
+  the object's offset in the grabber's frame. Used for both grips and the `simgrab` debug prop;
+  a hand-tracking pinch can reuse it with a different pose source.
+- `xr_math.h` — vector/quaternion helpers and `facing()` (upright, facing a point).
+- `screen_source.h` — the seam between the XR shell and the content (`ScreenSource`/`ScreenHost`,
+  `PlacementCommand`).
 - `mediacodec_source.{h,cpp}` — the `ScreenSource`: glues the network client to the decoder,
   owns the status text, asks `XrApp` to resize the Surface to the stream size.
 - `stream_client.{h,cpp}` — protocol v1 client on its own thread: the USB/Wi-Fi policy above
   (UDP discovery, last host), numeric-IP connects in 50 ms slices so `stop()` is immediate, hello
   check, CONFIG validation (1..8192, even), message parsing (unknown types skipped), PING every
   500 ms (5 fast ones after connect, offset from the lowest-RTT of the last 16), `FRAME_ACK` after
-  every batch of consumed frames, dead-link timeout.
+  every batch of consumed frames, `CONTROL` → `PlacementCommand`, dead-link timeout.
 - `video_decoder.{h,cpp}` — AMediaCodec into the ANativeWindow; `low-latency=1`,
   `vendor.qti-ext-dec-low-latency.enable=1`, `priority=0`; prefers
   `c2.qti.avc.decoder.low_latency` for H.264 and falls back to the default decoder if it rejects

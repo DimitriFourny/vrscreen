@@ -61,6 +61,8 @@ final class MirrorServer {
     var onFrameAck: ((ClientSession) -> Void)?
     /// Most recent CONFIG produced by the encoder; sent right after the hello.
     var cachedConfig: ConfigMessage?
+    /// CONTROL commands sent to every client right after the hello (--debug-control-on-connect).
+    var controlOnConnect: [ControlCommand] = []
 
     private(set) var activeClient: ClientSession?
     private(set) var bytesSent = 0
@@ -123,6 +125,14 @@ final class MirrorServer {
         return true
     }
 
+    /// Sends CONTROL to the active client right away (not subject to the frame windows;
+    /// it only queues behind data already waiting for this socket). Returns the client's
+    /// address, or nil if no client is connected.
+    func sendControl(_ command: ControlCommand) -> String? {
+        guard let client = activeClient, send(.control(command), to: client) else { return nil }
+        return client.address
+    }
+
     // MARK: Connections
 
     private func acceptPending() {
@@ -148,6 +158,10 @@ final class MirrorServer {
             if let config = cachedConfig {
                 send(.config(config), to: client)
                 client.sentConfig = config
+            }
+            for command in controlOnConnect {
+                send(.control(command), to: client)
+                log("server: sent CONTROL \(command) to \(client.address) (--debug-control-on-connect)")
             }
             onClientReady?(client)
         }
@@ -277,7 +291,7 @@ final class MirrorServer {
             onFrameAck?(client)
         case .unknown:
             break // Forward compatibility: skip unknown types.
-        case .config, .frame, .pong:
+        case .config, .frame, .control, .pong:
             break // Server-to-client types; ignore if a client echoes them.
         }
     }

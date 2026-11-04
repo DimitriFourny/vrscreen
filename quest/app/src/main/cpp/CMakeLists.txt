@@ -15,6 +15,7 @@ target_include_directories(native_app_glue PUBLIC ${ANDROID_NDK}/sources/android
 add_library(questmirror SHARED
     main.cpp
     xr_app.cpp
+    grab.cpp
     status_panel.cpp
     bitmap_font.cpp
     stream_client.cpp

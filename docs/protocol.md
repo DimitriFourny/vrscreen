@@ -113,6 +113,7 @@ Every message is:
 |--------|--------|-----------------|
 | `0x01` | CONFIG | server → client |
 | `0x02` | FRAME  | server → client |
+| `0x03` | CONTROL | server → client |
 | `0x10` | PING   | client → server |
 | `0x11` | PONG   | server → client |
 | `0x12` | FRAME_ACK | client → server |
@@ -179,6 +180,35 @@ One encoded picture.
 - `captureTimeMicros` is non-decreasing within a connection, but not unique: the
   keyframe sent to a newly connected client can be a re-encode of a picture that was
   already sent to a previous client.
+
+### `0x03` CONTROL (server → client)
+
+Asks the client to move the virtual screen (the Mac sender sends these from its global
+keyboard shortcuts). Sent to the current client only, as soon as the user acts; it is
+not subject to the frame windows of "Flow control".
+
+| Payload offset | Size | Field   | Notes                         |
+|---------------:|-----:|---------|-------------------------------|
+| 0              | 1    | command | `u8`, see below               |
+| 1              | rest | args    | command-specific, see below   |
+
+| Command | Name     | Args                | Meaning |
+|---------|----------|---------------------|---------|
+| `0x01`  | RECENTER | none                | Place the screen in front of the current head direction, keeping its distance and size. |
+| `0x02`  | MOVE     | `dx i8`, `dy i8`    | Rotate the screen around the user by `dx` yaw steps (positive = right) and `dy` pitch steps (positive = up), keeping its distance. |
+| `0x03`  | DISTANCE | `steps i8`          | Positive = farther, negative = closer. |
+| `0x04`  | SIZE     | `steps i8`          | Positive = bigger, negative = smaller. |
+| `0x05`  | RESET    | none                | Default distance and size, then recenter. |
+
+- `i8` is a signed byte (two's complement): `FF` = −1.
+- Step sizes are up to the client. The reference client (Quest app) uses 5° per MOVE
+  step, distance × 1.1^steps and width × 1.1^steps (aspect ratio kept), each clamped to
+  its own range.
+- Clients MUST ignore unknown commands and any bytes after a known command's
+  arguments (forward compatibility). A known command with missing argument bytes is
+  malformed.
+- Each message is one discrete step; holding a shortcut on the Mac sends repeated
+  messages (after ~300 ms, then every ~80 ms).
 
 ### `0x10` PING (client → server)
 
@@ -307,6 +337,13 @@ FRAME_ACK with `framesConsumed = 42`:
 
 ```
 12 00 00 00 04 00 00 00 2A
+```
+
+CONTROL MOVE `dx = −1, dy = +1` and CONTROL RECENTER:
+
+```
+03 00 00 00 03 02 FF 01
+03 00 00 00 01 01
 ```
 
 FRAME, keyframe, `captureTimeMicros = 2`, access unit `00 00 00 01 26 01 ...`:

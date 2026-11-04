@@ -8,7 +8,21 @@
 
 namespace qm {
 
-// Implemented by XrApp; lets a ScreenSource drive the quad's Surface.
+// A screen placement change requested remotely (the Mac's keyboard shortcuts, protocol CONTROL).
+struct PlacementCommand {
+    enum class Kind : uint8_t {
+        Recenter,  // in front of the current head direction, same distance/size
+        Move,      // orbit the head: a = yaw steps (+ = right), b = pitch steps (+ = up), 5 deg each
+        Distance,  // distance x 1.1^a
+        Size,      // width x 1.1^a
+        Reset,     // default distance and width, then recenter
+    };
+    Kind kind = Kind::Recenter;
+    int8_t a = 0;
+    int8_t b = 0;
+};
+
+// Implemented by XrApp; lets a ScreenSource drive the quad's Surface and placement.
 class ScreenHost {
 public:
     virtual ~ScreenHost() = default;
@@ -17,6 +31,9 @@ public:
     // follows). XrApp does it on the XR thread: onSurfaceDestroyed for the old Surface, then
     // onSurfaceReady with the new one. No-op if the size is already current.
     virtual void requestSurfaceSize(int32_t width, int32_t height) = 0;
+
+    // Thread-safe. Queued and applied on the XR thread at the next frame.
+    virtual void placementCommand(const PlacementCommand& command) = 0;
 };
 
 // Producer of the mirrored screen image: the seam between the XR shell and the content.

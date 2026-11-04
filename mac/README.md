@@ -64,6 +64,8 @@ Stop either with Ctrl-C.
 | `--keyframe-interval S`    | 5       | Maximum seconds between keyframes                            |
 | `--max-in-flight N`        | 3       | For clients that send FRAME_ACK: max frames sent but not yet consumed |
 | `--width N --height N`     | 1920x1080 | Test-pattern size                                          |
+| `--no-hotkeys`             | off     | Do not register the global screen-placement shortcuts        |
+| `--debug-control-on-connect SPEC` | none | Testing: send CONTROL commands to each client on connect, e.g. `"move:1,0;distance:-2;size:1;recenter;reset"` |
 
 Once per second it logs capture fps, encoded fps (and keyframes), captures skipped by
 backpressure, the bitrate actually sent, and the client with its unsent backlog and,
@@ -86,7 +88,36 @@ Once per second it logs received and decoded fps, bitrate, capture→decoded lat
 (avg/max, measured through the PING/PONG clock offset the way the Quest client does
 it), the last PING round trip, and the stream format. It acknowledges every FRAME
 (FRAME_ACK) as it hands it to the decoder, and reconnects every second while the
-sender is unreachable or after the sender restarts.
+sender is unreachable or after the sender restarts. CONTROL messages are printed
+(`control: MOVE dx=+1 dy=0`).
+
+## Placing the screen: global shortcuts
+
+While the sender runs, these shortcuts work from any app and move the screen in the
+headset (they send CONTROL messages to the connected client; with no client the
+sender logs and drops them):
+
+| Shortcut     | Action                                   | Held down |
+|--------------|------------------------------------------|-----------|
+| ⌃⌥⌘ ← / →    | Move the screen left / right (5° steps)  | repeats   |
+| ⌃⌥⌘ ↑ / ↓    | Move the screen up / down (5° steps)     | repeats   |
+| ⌃⌥⌘⇧ ↑ / ↓   | Farther / closer (×1.1 per step)         | repeats   |
+| ⌃⌥⌘⇧ → / ←   | Bigger / smaller (×1.1 per step)         | repeats   |
+| ⌃⌥⌘ R        | Recenter in front of where you look      | —         |
+| ⌃⌥⌘ 0        | Reset distance and size, and recenter    | —         |
+
+(⌃ control, ⌥ option, ⌘ command, ⇧ shift; step sizes are the Quest app's.) Held keys
+repeat after 300 ms, every 80 ms. Shortcuts are physical keys, so they are the same on
+QWERTY and AZERTY: arrows, the R key, and the 0 key of the number row (`à`/`0` on a
+French keyboard). `[ ] = -` were avoided because AZERTY puts them behind dead keys or
+on other keys.
+
+They use Carbon `RegisterEventHotKey`, which needs no Accessibility or Input
+Monitoring permission. The sender runs an AppKit event loop for them as a background
+(accessory) app: no Dock icon, no menu bar. Registration is exclusive: if another app
+(or a second sender) already owns a combination, the sender logs
+`hotkeys: could not register ⌃⌥⌘← (taken by another app)` at startup and keeps running
+without it. Every press is logged, e.g. `hotkey ⌃⌥⌘→ → MOVE dx=+1 dy=0 → 192.168.1.35:51234`.
 
 ## Screen Recording permission
 

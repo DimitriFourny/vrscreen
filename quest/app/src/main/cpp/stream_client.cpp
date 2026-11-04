@@ -30,6 +30,7 @@ namespace {
 
 constexpr uint8_t kMsgConfig = 0x01;
 constexpr uint8_t kMsgFrame = 0x02;
+constexpr uint8_t kMsgControl = 0x03;
 constexpr uint8_t kMsgPing = 0x10;
 constexpr uint8_t kMsgPong = 0x11;
 constexpr uint8_t kMsgFrameAck = 0x12;
@@ -585,6 +586,30 @@ bool StreamClient::handleMessage(uint8_t type, const uint8_t* payload, uint32_t 
                 *error = "decoder error";
                 return false;
             }
+            return true;
+        }
+        case kMsgControl: {
+            // command u8 | args; unknown commands and extra bytes are ignored.
+            if (length < 1) return true;
+            PlacementCommand command;
+            uint32_t needed = 1;
+            switch (payload[0]) {
+                case 0x01: command.kind = PlacementCommand::Kind::Recenter; break;
+                case 0x02: command.kind = PlacementCommand::Kind::Move; needed = 3; break;
+                case 0x03: command.kind = PlacementCommand::Kind::Distance; needed = 2; break;
+                case 0x04: command.kind = PlacementCommand::Kind::Size; needed = 2; break;
+                case 0x05: command.kind = PlacementCommand::Kind::Reset; break;
+                default:
+                    LOGI("CONTROL: unknown command 0x%02x ignored", payload[0]);
+                    return true;
+            }
+            if (length < needed) {
+                LOGW("CONTROL 0x%02x: %u byte(s), needs %u; ignored", payload[0], length, needed);
+                return true;
+            }
+            if (needed >= 2) command.a = static_cast<int8_t>(payload[1]);
+            if (needed >= 3) command.b = static_cast<int8_t>(payload[2]);
+            listener_.onControl(command);
             return true;
         }
         case kMsgPong:

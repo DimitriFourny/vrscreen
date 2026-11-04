@@ -1,3 +1,4 @@
+import AppKit
 import CoreVideo
 import Foundation
 import MirrorProtocol
@@ -18,6 +19,7 @@ let encoder = VideoEncoder(codec: options.codec, bitrate: Int(options.bitrateMbp
 let server = MirrorServer(port: options.port, maxFramesInFlight: UInt32(options.maxFramesInFlight), queue: queue)
 let pipeline = SenderPipeline(queue: queue, encoder: encoder, server: server)
 let discovery = options.discoveryPort.map { DiscoveryResponder(port: $0, tcpPort: options.port, queue: queue) }
+server.controlOnConnect = options.controlOnConnect
 let deliver: (CVPixelBuffer, UInt64) -> Void = { buffer, micros in pipeline.handleCapture(buffer, captureMicros: micros) }
 
 var testSource: TestPatternSource?
@@ -82,4 +84,26 @@ for sig in [SIGINT, SIGTERM] {
     signalSources.append(source)
 }
 
-dispatchMain()
+// Global shortcuts need the main thread to run an AppKit/Carbon event loop; the
+// accessory policy keeps the sender out of the Dock and the app switcher. Signals
+// are still handled on `queue`, so Ctrl-C shuts down as before.
+var hotkeys: HotkeyController?
+if options.hotkeys {
+    let app = NSApplication.shared
+    app.setActivationPolicy(.accessory)
+    let controller = HotkeyController { binding, isRepeat in
+        queue.async {
+            let action = "hotkey \(binding.label) → \(binding.command)\(isRepeat ? " (repeat)" : "")"
+            if let address = server.sendControl(binding.command) {
+                log("\(action) → \(address)")
+            } else {
+                log("\(action): no client connected, dropped")
+            }
+        }
+    }
+    controller.register()
+    hotkeys = controller
+    app.run()
+} else {
+    dispatchMain()
+}

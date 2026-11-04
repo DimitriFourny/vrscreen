@@ -1,5 +1,6 @@
 #pragma once
 
+#include "grab.h"
 #include "screen_source.h"
 #include "status_panel.h"
 
@@ -14,13 +15,17 @@
 #include <cstdint>
 #include <mutex>
 #include <string>
+#include <vector>
 
 namespace qm {
 
-// Where the screen is, in metres. Adjusted with the right thumbstick and persisted.
+// Where the screen is, in metres, relative to the head at the last recenter or grab release.
+// Adjusted with the thumbstick and by grabbing; persisted (LOCAL space resets every session, so an
+// absolute pose would be meaningless at the next launch).
 struct Placement {
-    float distance = 1.2f;  // from the head at the last recenter, along its gaze (yaw only)
-    float width = 1.8f;     // quad height follows the stream's aspect ratio
+    float distance = 1.2f;      // from the eyes to the screen centre
+    float width = 1.8f;         // quad height follows the stream's aspect ratio
+    float heightOffset = 0.0f;  // screen centre above (+) or below (-) eye height
 };
 
 // OpenXR shell: instance/session lifecycle, passthrough underlay, a world-locked screen quad backed
@@ -48,6 +53,7 @@ public:
 
     // ScreenHost
     void requestSurfaceSize(int32_t width, int32_t height) override;
+    void placementCommand(const PlacementCommand& command) override;
 
 private:
     struct SurfaceSwapchain {
@@ -74,15 +80,21 @@ private:
     void handleSessionStateChanged(const XrEventDataSessionStateChanged& event);
     void updateVisibility();
     void logInteractionProfiles();
-    void pollInput(double dtSeconds);
+    void pollInput(double dtSeconds, XrTime time);
+    // Runs the grabbers (controller grips, debug simulation) and moves the screen while held.
+    void updateGrabs(XrTime time);
+    void onGrabReleased(const char* who);
     void pollDebugProperties();
     bool recenter(XrTime time);
+    // Screen in front of `head` (yaw only) at the current distance and height offset.
+    void placeInFront(const XrPosef& head);
     void updateQuadPose();
+    void applyPlacementCommands();
     void setPlacement(float distance, float width, const char* reason);
     void loadPlacement();
     void savePlacement();
     void setFilterMode(int32_t mode, const char* reason);
-    void cycleFilterMode();
+    void startSimulatedGrab(const std::string& spec);
     bool filterModeSupported(int32_t mode) const;
     std::string resultString(XrResult result) const;
     std::string pathString(XrPath path) const;
@@ -119,11 +131,15 @@ private:
     XrSpace localSpace_ = XR_NULL_HANDLE;
     XrSpace viewSpace_ = XR_NULL_HANDLE;
 
-    // Input: A/X recenter, B/Y cycle the layer filter, right thumbstick distance (Y) and size (X).
+    // Input: A/X recenter, grips grab the screen, right thumbstick distance (Y) and size (X).
     XrActionSet actionSet_ = XR_NULL_HANDLE;
     XrAction recenterAction_ = XR_NULL_HANDLE;
-    XrAction filterAction_ = XR_NULL_HANDLE;
+    XrAction grabAction_ = XR_NULL_HANDLE;      // squeeze, per hand
+    XrAction gripPoseAction_ = XR_NULL_HANDLE;  // grip pose, per hand
     XrAction adjustAction_ = XR_NULL_HANDLE;
+    XrPath handPaths_[2] = {XR_NULL_PATH, XR_NULL_PATH};  // left, right
+    XrSpace gripSpaces_[2] = {XR_NULL_HANDLE, XR_NULL_HANDLE};
+    bool focused_ = false;  // input is only read while FOCUSED
 
     // Passthrough
     XrPassthroughFB passthrough_ = XR_NULL_HANDLE;
@@ -138,19 +154,28 @@ private:
     std::mutex resizeMutex_;
     int32_t requestedWidth_ = 0;  // guarded by resizeMutex_
     int32_t requestedHeight_ = 0;
+    std::mutex commandMutex_;
+    std::vector<PlacementCommand> commands_;  // from the Mac (network thread), guarded by commandMutex_
 
     // Placement
     Placement placement_;
     std::string placementPath_;
     bool placementDirty_ = false;
     double placementIdleSeconds_ = 0;
-    XrVector3f anchorPosition_{0, 0, 0};  // head position at the last recenter
-    float anchorForwardX_ = 0.0f;         // horizontal gaze direction at the last recenter
-    float anchorForwardZ_ = -1.0f;
+    XrVector3f anchorPosition_{0, 0, 0};    // head position at the last recenter / grab release
+    XrVector3f anchorDirection_{0, 0, -1};  // unit vector from the anchor to the screen centre
     XrPosef quadPose_{{0, 0, 0, 1}, {0, 0, 0}};
     bool quadPlaced_ = false;
     bool recenterRequested_ = true;  // place the quad on the first frame with a tracked head pose
     XrTime recenterAtTime_ = 0;      // pending XrEventDataReferenceSpaceChangePending::changeTime
+    XrPosef headPose_{{0, 0, 0, 1}, {0, 0, 0}};  // this frame's head pose in LOCAL space
+    bool headValid_ = false;
+
+    // Grabbing: left grip, right grip, and the debug.questmirror.simgrab simulation.
+    Grab grabs_[3];
+    int simGrabStep_ = 0;  // > 0 while a simulated grab runs (frames left)
+    XrPosef simGrabStart_{{0, 0, 0, 1}, {0, 0, 0}};
+    XrPosef simGrabEnd_{{0, 0, 0, 1}, {0, 0, 0}};
     int32_t filterMode_ = 0;
 
     // Stats / debug controls
@@ -161,6 +186,7 @@ private:
     std::string lastRecenterProp_;
     std::string lastDistanceProp_;
     std::string lastWidthProp_;
+    std::string lastSimGrabProp_;
 };
 
 }  // namespace qm

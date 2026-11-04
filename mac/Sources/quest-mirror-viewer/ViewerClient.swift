@@ -158,7 +158,7 @@ final class ViewerClient {
         case .pong(let clientTime, let serverTime):
             clock.addPong(clientSendMicros: clientTime, serverMicros: serverTime,
                           clientReceiveMicros: HostClock.nowMicros())
-        case .config, .frame:
+        case .config, .frame, .control:
             onMessage?(message)
         case .ping, .frameAck:
             break // Client-to-server types.

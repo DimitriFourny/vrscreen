@@ -71,6 +71,8 @@ client.onMessage = { message in
         stats.received += 1
         decoder.decode(frame) // handed to the decoder, or dropped while waiting for a keyframe
         client.acknowledgeFrame()
+    case .control(let command):
+        log("control: \(command)")
     default:
         break
     }

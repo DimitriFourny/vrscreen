@@ -35,6 +35,7 @@ public enum VideoCodec: UInt8, Sendable, CustomStringConvertible {
 public enum MessageType: UInt8, Sendable {
     case config = 0x01
     case frame = 0x02
+    case control = 0x03
     case ping = 0x10
     case pong = 0x11
     case frameAck = 0x12
@@ -76,6 +77,8 @@ public struct FrameMessage: Equatable, Sendable {
 public enum Message: Equatable, Sendable {
     case config(ConfigMessage)
     case frame(FrameMessage)
+    /// Server → client: screen placement command.
+    case control(ControlCommand)
     /// Client → server.
     case ping(clientTimeMicros: UInt64)
     /// Server → client; `serverTimeMicros` is on the same clock as `captureTimeMicros`.
@@ -114,6 +117,9 @@ public enum Message: Equatable, Sendable {
         case .frameAck(let n):
             type = MessageType.frameAck.rawValue
             payload.appendBigEndian(n)
+        case .control(let command):
+            type = MessageType.control.rawValue
+            payload = command.encoded()
         case .unknown(let t, let p):
             type = t
             payload = p
@@ -148,6 +154,8 @@ public enum Message: Equatable, Sendable {
                 isKeyframe: flags & FrameMessage.keyframeFlag != 0,
                 captureTimeMicros: time,
                 accessUnit: r.rest()))
+        case .control:
+            return .control(try ControlCommand.decode(payload))
         case .ping:
             guard let t = r.u64() else { throw .malformed(type: type, reason: "PING payload shorter than 8 bytes") }
             return .ping(clientTimeMicros: t)

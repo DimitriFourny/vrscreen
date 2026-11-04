@@ -41,5 +41,11 @@ let package = Package(
             dependencies: ["MirrorProtocol"],
             swiftSettings: testSwiftSettings
         ),
+        // Sender-only logic (shortcut table, hotkey event handling, CLI spec parsing).
+        .testTarget(
+            name: "SenderTests",
+            dependencies: ["quest-mirror-sender", "MirrorProtocol"],
+            swiftSettings: testSwiftSettings + [.swiftLanguageMode(.v5)]
+        ),
     ]
 )
