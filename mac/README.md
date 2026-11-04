@@ -107,6 +107,8 @@ follows light/dark mode; "QM" if the symbol is missing). Its menu has:
   cylinder whose radius is the viewing distance;
 - **Dim surroundings** 0–100 %: darkens the passthrough around the screen, up to
   black; the screen itself is never dimmed;
+- **Hand gestures** (checkbox, default off): lets you pinch & hold to move the screen
+  and use two hands to resize it; while off, the headset ignores hand input entirely;
 - **Re-center** and **Reset placement** (like ⌃⌥⌘R / ⌃⌥⌘0);
 - **Travel mode: On / Off** and **Open Quick Settings in headset…** (USB only, see below);
 - **Quit Quest Mirror**: the same clean shutdown as Ctrl-C (cursor released; when
@@ -129,12 +131,12 @@ the output) and the Quick Settings item is disabled. Over Wi-Fi (`--wifi-only`) 
 items show "headset not on USB".
 
 The sliders update the headset while you drag (at most 30 messages per second, the
-final value always sent). The sender owns these two settings: it sends them to every
-headset that connects and stores them in
+final value always sent); the checkbox applies at once. The sender owns these three
+settings: it sends them to every headset that connects and stores them in
 `~/Library/Application Support/QuestMirror/settings.json` (`{"curvature": 0-1000,
-"dim": 0-1000}`, permille; written half a second after the last change, read at
-startup; defaults 0 and 0). The stored values are sent to clients even with
-`--no-menu`.
+"dim": 0-1000, "handGestures": true|false}`, permille; written half a second after the
+last change, read at startup; defaults 0, 0 and off; a key missing from an older file
+takes its default). The stored values are sent to clients even with `--no-menu`.
 
 ## Placing the screen: shortcuts and mouse
 

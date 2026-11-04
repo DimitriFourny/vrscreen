@@ -16,6 +16,10 @@ import Testing
     // Absolute values, permille, u16 big-endian: 350 = 0x015E, 1000 = 0x03E8.
     #expect(Message.control(.setCurvature(350)).encoded() == Data([0x03, 0, 0, 0, 3, 0x0A, 0x01, 0x5E]))
     #expect(Message.control(.setDim(1000)).encoded() == Data([0x03, 0, 0, 0, 3, 0x0B, 0x03, 0xE8]))
+    #expect(Message.control(.setHandGestures(true)).encoded() == Data([0x03, 0, 0, 0, 2, 0x0C, 0x01]))
+    #expect(Message.control(.setHandGestures(false)).encoded() == Data([0x03, 0, 0, 0, 2, 0x0C, 0x00]))
+    // Any nonzero value means on; extra bytes are ignored.
+    #expect(try ControlCommand.decode(Data([0x0C, 0x07, 0xAA])) == .setHandGestures(true))
     // Out-of-range values still decode (receivers clamp).
     #expect(try ControlCommand.decode(Data([0x0A, 0xFF, 0xFF])) == .setCurvature(65535))
 }
@@ -24,7 +28,7 @@ import Testing
     let commands: [ControlCommand] = [
         .recenter, .distance(steps: -3), .size(steps: 4), .reset, .translate(dx: 127, dy: -128),
         .orbit(yawCentidegrees: .min, pitchCentidegrees: .max), .distanceFine(100), .sizeFine(-1),
-        .setCurvature(0), .setDim(500),
+        .setCurvature(0), .setDim(500), .setHandGestures(true), .setHandGestures(false),
         .unknown(command: 0x7E, args: Data([1, 2, 3])),
     ]
     var stream = WireProtocol.helloBytes()
@@ -53,4 +57,5 @@ import Testing
     #expect(throws: ProtocolError.self) { try ControlCommand.decode(Data([0x09, 0x00])) }
     #expect(throws: ProtocolError.self) { try ControlCommand.decode(Data([0x04])) }
     #expect(throws: ProtocolError.self) { try ControlCommand.decode(Data([0x0B, 0x03])) }
+    #expect(throws: ProtocolError.self) { try ControlCommand.decode(Data([0x0C])) }
 }

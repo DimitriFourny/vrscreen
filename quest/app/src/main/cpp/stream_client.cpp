@@ -606,6 +606,7 @@ bool StreamClient::handleMessage(uint8_t type, const uint8_t* payload, uint32_t 
                 case 0x09: command.kind = Kind::SizeFine; args = 1; argSize = 2; break;
                 case 0x0A: command.kind = Kind::SetCurvature; args = 1; argSize = 2; break;
                 case 0x0B: command.kind = Kind::SetDim; args = 1; argSize = 2; break;
+                case 0x0C: command.kind = Kind::SetHandGestures; args = 1; break;  // u8, nonzero = on
                 default:  // includes 0x02, the removed MOVE
                     LOGI("CONTROL: unknown command 0x%02x ignored", payload[0]);
                     return true;

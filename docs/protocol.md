@@ -205,6 +205,7 @@ as soon as the user acts; it is not subject to the frame windows of "Flow contro
 | `0x09`  | SIZE_FINE     | `v i16`                | Width × 1.1^(v/100); positive = bigger. `v = 100` equals one SIZE step. |
 | `0x0A`  | SET_CURVATURE | `value u16`            | **Absolute** curvature in permille, clamped to 0–1000: 0 = flat; otherwise the screen bends around the viewer on a cylinder of radius = viewing distance / (value/1000), so 1000 = radius equal to the viewing distance. |
 | `0x0B`  | SET_DIM       | `value u16`            | **Absolute**, **perceptual** dimming of the surroundings (passthrough) in permille, clamped to 0–1000: 0 = normal passthrough, 500 ≈ half as bright, 1000 = fully black. The client maps the value to its compositor's controls so that brightness falls roughly linearly. Never dims the screen itself. |
+| `0x0C`  | SET_HAND_GESTURES | `enabled u8`       | **Absolute**: 0 = off, any other value = on. While off, the client ignores hand input entirely (no hand-based moving or resizing). Default off. |
 
 - `i8` is a signed byte, `i16` a signed and `u16` an unsigned big-endian 16-bit integer
   (two's complement for signed): `FF` = −1, `FF E7` = −25, `03 E8` = 1000.
@@ -220,12 +221,13 @@ as soon as the user acts; it is not subject to the frame windows of "Flow contro
 - ORBIT, DISTANCE_FINE and SIZE_FINE come from continuous mouse/scroll gestures: the
   sender coalesces input and sends at most one of each per 1/60 s, so a client can
   apply them directly (or smooth them over a frame).
-- SET_CURVATURE and SET_DIM carry absolute values (idempotent); the sender is the
-  source of truth for both. It sends both right after the hello on every connection
-  (after the cached CONFIG if there is one, before the first FRAME), and again on every
-  change; slider drags on the Mac are throttled to at most 30 messages per second, the
-  final value always included. Clients apply them whenever they arrive, before or after
-  CONFIG, and keep them across CONFIG changes.
+- SET_CURVATURE, SET_DIM and SET_HAND_GESTURES carry absolute values (idempotent); the
+  sender is the source of truth for all three (the client does not persist them). It
+  sends all three right after the hello on every connection (after the cached CONFIG if
+  there is one, before the first FRAME), and again on every change; slider drags on the
+  Mac are throttled to at most 30 messages per second, the final value always included.
+  Clients apply them whenever they arrive, before or after CONFIG, and keep them across
+  CONFIG changes.
 - SET_DIM is a wish that applies while a picture is on screen: a client must not dim the
   surroundings while it shows no picture (searching, connecting, waiting for the first
   frame), since the user then needs to see the room. The reference client keeps the dim
@@ -369,11 +371,13 @@ CONTROL TRANSLATE `dx = −1, dy = +1`, ORBIT yaw +5.00° pitch −2.50°, and R
 03 00 00 00 01 01
 ```
 
-CONTROL SET_CURVATURE 350 (35 %) and SET_DIM 1000 (black surroundings):
+CONTROL SET_CURVATURE 350 (35 %), SET_DIM 1000 (black surroundings) and
+SET_HAND_GESTURES on:
 
 ```
 03 00 00 00 03 0A 01 5E
 03 00 00 00 03 0B 03 E8
+03 00 00 00 02 0C 01
 ```
 
 FRAME, keyframe, `captureTimeMicros = 2`, access unit `00 00 00 01 26 01 ...`:
@@ -387,7 +391,7 @@ FRAME, keyframe, `captureTimeMicros = 2`, access unit `00 00 00 01 26 01 ...`:
 ```
 server → client  hello  QMIR 0001
 server → client  CONFIG codec=2 3840x2160 (VPS SPS PPS, ~100 B)
-server → client  CONTROL SET_CURVATURE 350, CONTROL SET_DIM 0 (current settings)
+server → client  CONTROL SET_CURVATURE 350, SET_DIM 0, SET_HAND_GESTURES 0 (current settings)
 server → client  FRAME  key=1 (VPS SPS PPS + IDR slices)
 client → server  FRAME_ACK 1
 client → server  PING

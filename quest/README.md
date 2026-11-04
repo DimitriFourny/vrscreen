@@ -21,6 +21,13 @@ export ANDROID_HOME=$HOME/Library/Android/sdk   # or put sdk.dir in local.proper
 The OpenXR loader and headers come from Maven (`org.khronos.openxr:openxr_loader_for_android`,
 prefab); no Meta SDK is used.
 
+Host unit tests (gesture state machine, `facing()` near the zenith, highlight geometry; plain
+CMake + the host compiler, using the OpenXR headers Gradle extracted, so build the APK once first):
+
+```sh
+cmake -S tests -B build/host-tests && cmake --build build/host-tests && ctest --test-dir build/host-tests --output-on-failure
+```
+
 ## Install and run
 
 ```sh
@@ -110,6 +117,52 @@ Measured on this Quest 3 (HEVC, Mac on 5 GHz Wi-Fi, same access point):
 | Right thumbstick right / left | Screen larger / smaller (0.5–5 m wide) |
 | Hold the Meta button (system recenter) | The app re-places the screen in front of you |
 
+While the screen is grabbed (grip or hand), a thin blue frame shows around it (an extra layer of
+the same shape, 2.4 cm larger on each side at the default 1.8 m width, behind the screen; a
+cylinder of the same radius when curved). It is only submitted while grabbing, so it costs nothing
+the rest of the time.
+
+### Hand gestures
+
+Off by default. To use them:
+
+1. On the Mac: menu-bar icon → **Hand gestures** (protocol `SET_HAND_GESTURES`; the Mac remembers
+   it and re-sends it on every connect, the headset does not store it).
+2. On the headset: Settings → Movement tracking → **Hand and body tracking** on, with
+   **auto-switch between hands and controllers** on. Then put the controllers down: hands take over.
+
+| Gesture | Action |
+| --- | --- |
+| **Pinch and hold** (thumb + index, about 0.4 s), one hand | Grab: the screen follows your hand rigidly, like a grip grab. Moving the hand carries it; pointing (the hand's aim ray) swings it around your hand, so a small arm movement places it far away or high up. Open the fingers to let go; it stays there, saved |
+| Pinch with the **other hand too** (0.2 s) | Resize: width × (distance between the hands now ÷ when the second hand joined), 0.5–5 m; the screen's centre follows the midpoint between your hands (translation only) |
+| Open one of the two hands | Back to a one-hand grab with the other hand, from where the screen is (no jump); the new size is kept |
+
+Details and limits:
+
+- The pose is the runtime's aim pose (`XR_FB_hand_tracking_aim`): it is the pinch-ray origin near
+  the thumb and index, oriented from the shoulder through the hand, and the runtime already
+  stabilises it for pointing; it does not twist when the fingers close or open, unlike the wrist or
+  the fingertips. A light speed-adaptive filter (one-euro, 3 Hz at rest, ~12 Hz when moving)
+  removes the remaining jitter, which a lever of a metre or more would otherwise magnify.
+- The 0.4 s hold avoids grabbing by accident (hands moving in your lap). A pinch that flickers for
+  less than 0.15 s does not drop the screen; while the pinch is loosening (or the hand is briefly
+  lost) the screen holds still instead of following the fingers opening, and a hand lost for more
+  than 0.5 s lets go. After a hand lets go for any other reason than opening (lost, Meta gesture,
+  disabled), it has to open and pinch again.
+- The system gesture (palm towards your face, pinch: Meta menu / menu button) never grabs and ends
+  a grab by that hand.
+- Grips and hands never grab at once: whichever starts first holds the screen until released; a
+  pinch made meanwhile has to be repeated.
+- While the Mac has gestures off, hand tracking is not even queried; turning them off during a
+  hand grab releases it.
+- Logged: `Hand trackers created` (or `Hand tracking unavailable: <why>`), `Mac CONTROL
+  SET_HAND_GESTURES on|off`, `Hand tracking: left hand tracked|not tracked`, `Hand grab started`,
+  `Two-hand resize ...`, `Grab released (hand, pinch released): ... (elevation 72 deg)`, and a hint
+  if gestures are on but no hand was tracked for 10 s (controllers in use or hand tracking off).
+
+In bed: lie back, pinch and hold, then point up: the screen swings up around your hand and can go
+anywhere overhead, including straight up. See "Orientation" below for how it faces you there.
+
 From the Mac (sender shortcuts, sent as protocol `CONTROL` messages; see `../mac/README.md`):
 
 | Mac shortcut | Action |
@@ -146,10 +199,24 @@ flat and the surroundings normal):
   once a picture is shown again. Coming back to the app (session visible again) starts undimmed.
 
 Orientation: grabbing, orbiting, recenter and reset turn the screen towards your head (yaw, and
-pitch when it sits above or below eye height); it never rolls, so it stays upright. Sliding and
-distance/size changes keep the orientation it has. While grabbed it turns towards your current
-head position; it ignores the thumbstick, A/X and Mac commands until released (one grabber at a
-time; the first grip wins).
+pitch when it sits above or below eye height); it never rolls, so it stays upright (except
+overhead or lying down, see below). Sliding and distance/size changes keep the orientation it has.
+While grabbed it turns towards your current head position; it ignores the thumbstick, A/X and Mac
+commands until released (one grabber at a time; the first one wins).
+
+Overhead and lying down (`facing()` in `xr_math.h`): "upright" relative to gravity breaks down
+near the zenith (a screen straight above has no "towards you" direction, so tiny head movements
+would spin it and moving it over the top would flip it by 180°) and for someone lying down (on
+your back with the screen towards the top of your head, gravity's up reads upside down). So the
+screen's up blends from gravity to your head's up when it is 65–85° above (or below) eye level, or
+when your head is tilted 50–80° from upright. Standing and looking up at a high screen this changes
+nothing (your head's up is gravity's up seen from there); lying on your back the picture's top
+points to the top of your head at any elevation, straight overhead included; lying on your side
+the picture lies on its side with you. Limit: if your head's up points straight at the screen (the
+screen overhead while you look straight ahead) the up is undefined and it falls back to gravity.
+Recenter (A/X, Meta button, Mac, launch) uses your head's heading with its pitch undone, so lying
+on your back and looking at the ceiling, "in front" is towards your feet; the saved height offset
+is kept up to 85° of elevation.
 
 What is saved (`files/placement.txt`, as `distance width heightOffset`): distance from the eyes,
 width, and how far the centre sits above or below eye height. They are written when you release a
@@ -168,10 +235,21 @@ adb shell setprop debug.questmirror.distance 1.5       # metres (saved like the 
 adb shell setprop debug.questmirror.width 2.0          # metres (saved like the thumbstick)
 adb shell "setprop debug.questmirror.simgrab '0.3 0.2 0 45'"  # simulated grab: the grabber starts
                                                        # at the head, moves by (x, y, z) m, turns 45° left
+adb shell "setprop debug.questmirror.simpinch '1 6 0 0.2 0'"  # simulated pinch (see below)
 adb shell setprop debug.questmirror.filter 1           # compositor filter mode (default 0 = none)
 adb shell setprop debug.questmirror.lowlatency 0       # A/B: decoder without low-latency keys
 adb shell setprop debug.questmirror.filter "''"        # clear any of these
 ```
+
+`simpinch` runs a scripted pinch through the hand-gesture state machine instead of tracked hands
+(only while gestures are on, like real hands; otherwise it is logged and ignored):
+`'hands seconds [dx dy dz [spread [pitchDegrees]]]'`. One hand (the right) or both start 35 cm in
+front of the head, 25 cm below it (both: 30 cm apart), aiming where the head looks, pinch, hold
+still 0.5 s (the grab starts after 0.4 s), then move by (dx, dy, dz) m in LOCAL space, spread
+`spread` m further apart and pitch the aim up by `pitchDegrees` about the hand, hold still 0.5 s
+and open the pinch at `seconds`. The expected end position or width is logged first. Examples:
+`'1 6 0 0.2 0'` (raise the screen 20 cm), `'2 6 0 0 0 0.3'` (double the width), `'1 6 0 0 0 0 70'`
+(point up: the screen swings overhead).
 
 Filter modes (`XR_FB_composition_layer_settings`, plus `XR_META_automatic_layer_filter` for 6),
 only settable through the prop. No filtering is the default: compared in the headset it shows
@@ -193,14 +271,21 @@ compared with none. Mode 0 submits the quad without any layer-settings struct.
 
 - `main.cpp` — `android_main`: Android lifecycle (native_app_glue) and the frame loop.
 - `xr_app.{h,cpp}` — OpenXR instance/session state machine, EGL context for the GLES binding,
-  passthrough layer, the two Android-surface swapchains (screen + status panel), Surface resizes,
-  input (A/X, grips, thumbstick), placement (anchor = head position, unit direction, distance;
-  Mac `CONTROL` commands queued from the network thread) and layer filtering.
+  passthrough layer, the Android-surface swapchains (screen, status panel, highlight frame),
+  Surface resizes, input (A/X, grips, thumbstick, hand gestures), placement (anchor = head
+  position, unit direction, distance; Mac `CONTROL` commands queued from the network thread) and
+  layer filtering.
 - `grab.{h,cpp}` — `Grab`: per-frame `update(pressed, grabberPose, allowStart, &position)`; keeps
-  the object's offset in the grabber's frame. Used for both grips and the `simgrab` debug prop;
-  a hand-tracking pinch can reuse it with a different pose source.
-- `xr_math.h` — vector/quaternion helpers, `facing()` (upright, facing a point), the slide/orbit
-  maths and `cylinderFor()` (cylinder pose, radius and arc for the curved screen).
+  the object's offset in the grabber's frame. Used for grips, one-hand pinches and the `simgrab`
+  debug prop.
+- `hand_gestures.{h,cpp}` — `HandGestures`: the platform-independent gesture state machine (hold,
+  release hysteresis, system-gesture rejection, one-hand grab via `Grab`, two-hand resize) fed one
+  `HandSample` per hand per frame; `PoseFilter` (one-euro smoothing of the aim pose).
+- `hand_tracker.{h,cpp}` — `HandTracker`: `XR_EXT_hand_tracking` trackers (created with the session,
+  destroyed before it) read with `XR_FB_hand_tracking_aim` into `HandSample`s.
+- `xr_math.h` — vector/quaternion helpers, `facing()` (upright, facing a point; head-up blend
+  overhead/lying down), `headingOf()` (pitch-robust heading for recenter), the slide/orbit maths,
+  `cylinderFor()` (cylinder pose, radius and arc for the curved screen) and `highlightFrame()`.
 - `dim_controller.h` — `DimController` (when the surroundings may be dimmed: grace, fades) and
   `passthroughOpacity()` (perceptual SET_DIM mapping).
 - `screen_source.h` — the seam between the XR shell and the content (`ScreenSource`/`ScreenHost`,
@@ -246,4 +331,4 @@ Runtime facts found on this Quest 3 (runtime "Oculus 209.166.0"):
   `XR_FB_composition_layer_image_layout`'s `VERTICAL_FLIP` bit. The app sets it on the quads and
   on the cylinder.
 - No projection layer is needed: frames contain only the passthrough layer and one screen layer
-  (quad or cylinder).
+  (quad or cylinder), plus the highlight frame behind it while the screen is grabbed.

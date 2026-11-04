@@ -4,8 +4,8 @@
 
 namespace qm {
 
-// Moves a world-locked object with a tracked "grabber" pose: a controller grip today, possibly a
-// hand-tracking pinch later. Feed it the grabber's pose and button state every frame.
+// Moves a world-locked object with a tracked "grabber" pose: a controller grip, or a hand's aim
+// pose while it pinches (HandGestures). Feed it the grabber's pose and button state every frame.
 //
 // While held, the object follows the grabber rigidly: the object's position in the grabber's own
 // frame at grab start is kept, so moving the hand translates it and turning the wrist swings it

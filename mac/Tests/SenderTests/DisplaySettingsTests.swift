@@ -37,15 +37,20 @@ import Testing
     defer { try? FileManager.default.removeItem(at: dir) }
     let store = DisplaySettingsStore(url: dir.appendingPathComponent("QuestMirror/settings.json"))
     #expect(store.load() == .defaults) // missing file
-    try store.save(DisplaySettings(curvature: 350, dim: 1000))
-    #expect(store.load() == DisplaySettings(curvature: 350, dim: 1000))
+    try store.save(DisplaySettings(curvature: 350, dim: 1000, handGestures: true))
+    #expect(store.load() == DisplaySettings(curvature: 350, dim: 1000, handGestures: true))
     // Hand-edited files: out-of-range values are clamped, missing keys default, garbage → defaults.
     try Data(#"{"curvature": 4000}"#.utf8).write(to: store.url)
-    #expect(store.load() == DisplaySettings(curvature: 1000, dim: 0))
+    #expect(store.load() == DisplaySettings(curvature: 1000, dim: 0, handGestures: false))
+    // A file from before hand gestures existed loads with them off.
+    try Data(#"{"curvature": 751, "dim": 502}"#.utf8).write(to: store.url)
+    #expect(store.load() == DisplaySettings(curvature: 751, dim: 502, handGestures: false))
     try Data("not json".utf8).write(to: store.url)
     #expect(store.load() == .defaults)
 
-    #expect(DisplaySettings(curvature: 350, dim: 20).commands == [.setCurvature(350), .setDim(20)])
+    #expect(DisplaySettings.defaults.handGestures == false)
+    #expect(DisplaySettings(curvature: 350, dim: 20, handGestures: true).commands
+        == [.setCurvature(350), .setDim(20), .setHandGestures(true)])
     #expect(DisplaySettings.permille(fromPercent: 35.04) == 350)
     #expect(DisplaySettings.permille(fromPercent: 120) == 1000)
     #expect(DisplaySettings.permille(fromPercent: -3) == 0)

@@ -62,6 +62,9 @@ constexpr const char* kWidthProperty = "debug.questmirror.width";
 // "dx dy dz [yawDegrees]": simulate a grab that starts at the head pose and moves the grabber by
 // (dx, dy, dz) metres in LOCAL space, turned by yaw, then releases (exercises Grab without buttons).
 constexpr const char* kSimGrabProperty = "debug.questmirror.simgrab";
+// "hands seconds [dx dy dz [spread [pitchDegrees]]]": a scripted pinch fed through HandGestures
+// (see startSimulatedPinch); exercises the gesture state machine and the highlight without hands.
+constexpr const char* kSimPinchProperty = "debug.questmirror.simpinch";
 constexpr const char* kDimGammaProperty = "debug.questmirror.dimgamma";  // tuning: opacity = (1 - dim)^gamma
 
 // Initial screen Surface size; the stream's CONFIG resizes it.
@@ -73,6 +76,12 @@ constexpr float kMinWidth = 0.5f, kMaxWidth = 5.0f;
 constexpr float kStatusWidthFraction = 0.6f;  // status panel width relative to the screen width
 // Widest arc of the curved screen (radians); a wider screen gets a larger radius instead.
 constexpr float kMaxCylinderAngle = 2.8f;
+// Recenter keeps the saved height offset up to this elevation (screen overhead when lying in bed).
+constexpr float kMaxPlacementElevation = 85.0f * 3.14159265f / 180.0f;
+// Highlight frame while the screen is grabbed: accent blue, 85 % opaque (premultiplied RGBA).
+constexpr int32_t kHighlightSize = 16;
+constexpr uint8_t kHighlightAlpha = 217;
+constexpr uint8_t kHighlightRgb[3] = {64, 160, 255};
 constexpr float kStickDeadzone = 0.25f;
 constexpr float kDistanceSpeed = 0.8f;  // m/s at full deflection
 constexpr float kWidthDoublingsPerSecond = 0.7f;
@@ -124,6 +133,10 @@ bool loadFunction(XrInstance instance, const char* name, Pfn* out) {
 XrApp::XrApp(ANativeActivity* activity, JNIEnv* env, ScreenSource& source)
     : activity_(activity), env_(env), source_(source) {
     source_.attachHost(*this);
+    HandGestureConfig gestures;
+    gestures.minWidth = kMinWidth;
+    gestures.maxWidth = kMaxWidth;
+    handGestures_ = HandGestures(gestures);
     if (activity_->internalDataPath != nullptr) {
         mkdir(activity_->internalDataPath, 0700);
         placementPath_ = std::string(activity_->internalDataPath) + "/placement.txt";
@@ -153,16 +166,27 @@ bool XrApp::initialize() {
         return false;
     }
     setFilterMode(hasLayerSettings_ ? kDefaultFilterMode : 0, "default");
+    // Optional: without hand tracking the app works as before (the reason is logged).
+    handTracker_.createTrackers(instance_, systemId_, session_, hasHandTracking_, hasHandTrackingAim_);
     lastRecenterProp_ = readProperty(kRecenterProperty);
     lastDistanceProp_ = readProperty(kDistanceProperty);
     lastWidthProp_ = readProperty(kWidthProperty);
     lastSimGrabProp_ = readProperty(kSimGrabProperty);
+    lastSimPinchProp_ = readProperty(kSimPinchProperty);
     lastFilterProp_ = readProperty(kFilterProperty);
     if (!lastFilterProp_.empty()) setFilterMode(std::atoi(lastFilterProp_.c_str()), kFilterProperty);
 
     if (!createSurfaceSwapchain(StatusPanel::kWidth, StatusPanel::kHeight, &status_)) return false;
     statusPanel_.attach(status_.window);
     LOGI("Status panel swapchain created: %dx%d", status_.width, status_.height);
+    if (createSurfaceSwapchain(kHighlightSize, kHighlightSize, &highlight_)) {
+        const int32_t rc = ANativeWindow_setBuffersGeometry(highlight_.window, kHighlightSize, kHighlightSize,
+                                                            WINDOW_FORMAT_RGBA_8888);
+        if (rc != 0) LOGW("Highlight: setBuffersGeometry failed rc=%d", rc);
+    } else {
+        destroySurfaceSwapchain(&highlight_);
+        LOGW("Highlight frame swapchain not created: grabbing works without the frame");
+    }
     return createScreenSwapchain(kInitialSurfaceWidth, kInitialSurfaceHeight);
 }
 
@@ -199,6 +223,10 @@ bool XrApp::createInstance() {
     if (hasImageLayout_) enabled.push_back(XR_FB_COMPOSITION_LAYER_IMAGE_LAYOUT_EXTENSION_NAME);
     hasCylinder_ = hasExtension(available, XR_KHR_COMPOSITION_LAYER_CYLINDER_EXTENSION_NAME);
     if (hasCylinder_) enabled.push_back(XR_KHR_COMPOSITION_LAYER_CYLINDER_EXTENSION_NAME);
+    hasHandTracking_ = hasExtension(available, XR_EXT_HAND_TRACKING_EXTENSION_NAME);
+    if (hasHandTracking_) enabled.push_back(XR_EXT_HAND_TRACKING_EXTENSION_NAME);
+    hasHandTrackingAim_ = hasHandTracking_ && hasExtension(available, XR_FB_HAND_TRACKING_AIM_EXTENSION_NAME);
+    if (hasHandTrackingAim_) enabled.push_back(XR_FB_HAND_TRACKING_AIM_EXTENSION_NAME);
     for (const char* name : enabled) LOGI("Enabling extension %s", name);
     if (!hasLayerSettings_) LOGW("%s not available: quad sharpening/super-sampling disabled",
                                  XR_FB_COMPOSITION_LAYER_SETTINGS_EXTENSION_NAME);
@@ -417,6 +445,23 @@ void XrApp::destroySurfaceSwapchain(SurfaceSwapchain* sc) {
     *sc = SurfaceSwapchain{};
 }
 
+bool XrApp::drawHighlight() {
+    ANativeWindow_Buffer buffer;
+    const int32_t rc = ANativeWindow_lock(highlight_.window, &buffer, nullptr);
+    if (rc != 0) {
+        LOGW("Highlight: ANativeWindow_lock failed rc=%d", rc);
+        return false;
+    }
+    // RGBA_8888, premultiplied alpha.
+    auto premultiply = [](uint8_t c) { return static_cast<uint32_t>(c * kHighlightAlpha / 255); };
+    const uint32_t pixel = premultiply(kHighlightRgb[0]) | premultiply(kHighlightRgb[1]) << 8 |
+                           premultiply(kHighlightRgb[2]) << 16 | static_cast<uint32_t>(kHighlightAlpha) << 24;
+    auto* row = static_cast<uint32_t*>(buffer.bits);
+    for (int32_t y = 0; y < buffer.height; ++y, row += buffer.stride) std::fill(row, row + buffer.width, pixel);
+    ANativeWindow_unlockAndPost(highlight_.window);
+    return true;
+}
+
 bool XrApp::createScreenSwapchain(int32_t width, int32_t height) {
     if (!createSurfaceSwapchain(width, height, &screen_)) {
         destroySurfaceSwapchain(&screen_);
@@ -466,6 +511,9 @@ void XrApp::shutdown() {
     destroyScreenSwapchain();
     statusPanel_.detach();
     destroySurfaceSwapchain(&status_);
+    destroySurfaceSwapchain(&highlight_);
+    highlightDrawn_ = false;
+    handTracker_.destroyTrackers();
     if (passthroughLayer_ != XR_NULL_HANDLE) pfnDestroyPassthroughLayerFB(passthroughLayer_);
     passthroughLayer_ = XR_NULL_HANDLE;
     if (passthrough_ != XR_NULL_HANDLE) pfnDestroyPassthroughFB(passthrough_);
@@ -607,7 +655,7 @@ void XrApp::pollInput(double dtSeconds, XrTime time) {
     syncInfo.activeActionSets = &active;
     if (XR_FAILED(xrSyncActions(session_, &syncInfo))) return;
 
-    const bool grabbing = std::any_of(std::begin(grabs_), std::end(grabs_), [](const Grab& g) { return g.active(); });
+    const bool grabbing = screenGrabbed();
     XrActionStateGetInfo getInfo{XR_TYPE_ACTION_STATE_GET_INFO};
     getInfo.action = recenterAction_;
     XrActionStateBoolean button{XR_TYPE_ACTION_STATE_BOOLEAN};
@@ -635,7 +683,14 @@ void XrApp::pollInput(double dtSeconds, XrTime time) {
     placementIdleSeconds_ = 0;
 }
 
-void XrApp::updateGrabs(XrTime time) {
+bool XrApp::screenGrabbed() const {
+    return handGestures_.active() ||
+           std::any_of(std::begin(grabs_), std::end(grabs_), [](const Grab& g) { return g.active(); });
+}
+
+XrVector3f XrApp::headUp() const { return rotate(headPose_.orientation, {0.0f, 1.0f, 0.0f}); }
+
+void XrApp::updateGrabs(double dtSeconds, XrTime time) {
     static const char* const kNames[3] = {"left grip", "right grip", "simulated"};
     if (!quadPlaced_) return;
     for (int i = 0; i < 3; ++i) {
@@ -667,7 +722,7 @@ void XrApp::updateGrabs(XrTime time) {
             --simGrabStep_;
         }
 
-        bool othersActive = false;
+        bool othersActive = handGestures_.active();
         for (int j = 0; j < 3; ++j) othersActive |= j != i && grabs_[j].active();
         XrVector3f position = quadPose_.position;
         const Grab::Event event = grabs_[i].update(pressed, tracked ? &pose : nullptr, !othersActive, &position);
@@ -679,9 +734,94 @@ void XrApp::updateGrabs(XrTime time) {
         if (grabs_[i].active()) {
             // Position follows the grabber; orientation stays upright, facing the head.
             quadPose_.position = position;
-            if (headValid_) quadPose_.orientation = facing(position, headPose_.position);
+            if (headValid_) quadPose_.orientation = facing(position, headPose_.position, headUp());
         }
         if (event == Grab::Event::Released) onGrabReleased(kNames[i]);
+    }
+
+    // Hand gestures: ignored completely (and any hand grab ends) while the Mac has them off.
+    HandSample hands[2];
+    readHands(dtSeconds, time, hands);
+    const bool gripActive = std::any_of(std::begin(grabs_), std::end(grabs_), [](const Grab& g) { return g.active(); });
+    XrVector3f position = quadPose_.position;
+    float width = placement_.width;
+    const HandGestures::Event event =
+        handGestures_.update(dtSeconds, hands, handGesturesEnabled_, !gripActive, &position, &width);
+    static const char* const kHands[2] = {"left", "right"};
+    const int hand = handGestures_.grabbingHand();
+    switch (event) {
+        case HandGestures::Event::Started:
+            LOGI("Hand grab started (%s): screen at (%.2f, %.2f, %.2f), %.2f m wide",
+                 hand < 0 ? "both hands" : kHands[hand], quadPose_.position.x, quadPose_.position.y,
+                 quadPose_.position.z, placement_.width);
+            break;
+        case HandGestures::Event::TwoHandStarted:
+            LOGI("Two-hand resize: second hand joined, screen %.2f m wide", placement_.width);
+            break;
+        case HandGestures::Event::TwoHandEnded:
+            LOGI("Two-hand resize ended (%s): %.2f m wide; moving on with the %s hand", handGestures_.lastEndReason(),
+                 width, hand < 0 ? "?" : kHands[hand]);
+            break;
+        case HandGestures::Event::None:
+        case HandGestures::Event::Released:
+            break;
+    }
+    if (handGestures_.active()) {
+        quadPose_.position = position;
+        placement_.width = width;
+        if (headValid_) quadPose_.orientation = facing(position, headPose_.position, headUp());
+    }
+    if (event == HandGestures::Event::Released) {
+        onGrabReleased((std::string("hand, ") + handGestures_.lastEndReason()).c_str());
+    }
+}
+
+void XrApp::readHands(double dtSeconds, XrTime time, HandSample hands[2]) {
+    hands[0] = hands[1] = HandSample{};
+    if (simPinchElapsed_ >= 0.0) {
+        // Scripted: hands still for kStill (the hold starts the grab), then moving linearly, then
+        // still again until the pinch opens at simPinchSeconds_; untracked after kRelease more.
+        constexpr double kStill = 0.5, kRelease = 0.4;
+        const double t = simPinchElapsed_;
+        simPinchElapsed_ += dtSeconds;
+        if (t > simPinchSeconds_ + kRelease) {
+            simPinchElapsed_ = -1.0;
+            LOGI("Simulated pinch finished");
+            return;
+        }
+        const float f = static_cast<float>(std::clamp((t - kStill) / std::max(simPinchSeconds_ - 2.0 * kStill, 0.01), 0.0, 1.0));
+        const bool pinched = t < simPinchSeconds_;
+        const XrQuaternionf& head = simPinchHead_.orientation;
+        const XrQuaternionf aim = multiply(axisAngle(rotate(head, {1.0f, 0.0f, 0.0f}), simPinchPitch_ * f), head);
+        for (int i = simPinchHands_ == 1 ? 1 : 0; i < 2; ++i) {  // one hand: the right one
+            const float halfApart = simPinchHands_ == 1 ? 0.15f : 0.15f + 0.5f * simPinchSpread_ * f;
+            HandSample& s = hands[i];
+            s.tracked = true;
+            s.pinchBit = pinched;
+            s.pinchStrength = pinched ? 1.0f : 0.0f;
+            s.aim.position = simPinchHead_.position + rotate(head, {i == 0 ? -halfApart : halfApart, -0.25f, -0.35f}) +
+                             simPinchMove_ * f;
+            s.aim.orientation = aim;
+        }
+        return;
+    }
+    // Off: no hand processing at all (no joint queries).
+    if (!handGesturesEnabled_ || !focused_ || !handTracker_.available()) return;
+    handTracker_.locate(localSpace_, time, hands);
+    static const char* const kHands[2] = {"left", "right"};
+    bool any = false;
+    for (int i = 0; i < 2; ++i) {
+        if (hands[i].tracked != handTracked_[i]) {
+            handTracked_[i] = hands[i].tracked;
+            LOGI("Hand tracking: %s hand %s", kHands[i], hands[i].tracked ? "tracked" : "not tracked");
+        }
+        any |= hands[i].tracked;
+    }
+    handsUnseenSeconds_ = any ? 0.0 : handsUnseenSeconds_ + dtSeconds;
+    if (handsUnseenSeconds_ >= 10.0 && !handsHintLogged_) {
+        handsHintLogged_ = true;
+        LOGI("Hand gestures on, but no hand tracked for 10 s: put the controllers down; hand tracking must be on in "
+             "Settings > Movement tracking > Hand and body tracking (with auto-switch from controllers)");
     }
 }
 
@@ -690,9 +830,10 @@ void XrApp::onGrabReleased(const char* who) {
     // relative to the new spot.
     if (headValid_) anchorPosition_ = headPose_.position;
     moveScreenTo(quadPose_.position, true);
-    LOGI("Grab released (%s): screen at (%.2f, %.2f, %.2f), %.2f m away, %.2f m above eye height", who,
-         quadPose_.position.x, quadPose_.position.y, quadPose_.position.z, placement_.distance,
-         placement_.heightOffset);
+    LOGI("Grab released (%s): screen at (%.2f, %.2f, %.2f), %.2f m wide, %.2f m away, %.2f m above eye height "
+         "(elevation %.0f deg)",
+         who, quadPose_.position.x, quadPose_.position.y, quadPose_.position.z, placement_.width, placement_.distance,
+         placement_.heightOffset, std::asin(std::clamp(anchorDirection_.y, -1.0f, 1.0f)) * 180.0f / 3.14159265f);
     savePlacement();
 }
 
@@ -703,7 +844,7 @@ void XrApp::moveScreenTo(const XrVector3f& position, bool faceAnchor) {
     placement_.distance = std::clamp(distance, kMinDistance, kMaxDistance);
     placement_.heightOffset = anchorDirection_.y * placement_.distance;
     updateQuadPose();
-    if (faceAnchor) quadPose_.orientation = facing(quadPose_.position, anchorPosition_);
+    if (faceAnchor) quadPose_.orientation = facing(quadPose_.position, anchorPosition_, headUp());
 }
 
 void XrApp::startSimulatedGrab(const std::string& spec) {
@@ -727,6 +868,46 @@ void XrApp::startSimulatedGrab(const std::string& spec) {
     LOGI("Simulated grab: move (%.2f, %.2f, %.2f), yaw %.0f deg; expect the screen at (%.2f, %.2f, %.2f)", dx, dy,
          dz, yawDegrees, expected.x, expected.y, expected.z);
     simGrabStep_ = 3;
+}
+
+void XrApp::startSimulatedPinch(const std::string& spec) {
+    int hands = 0;
+    float seconds = 0, dx = 0, dy = 0, dz = 0, spread = 0, pitchDegrees = 0;
+    const int fields =
+        std::sscanf(spec.c_str(), "%d %f %f %f %f %f %f", &hands, &seconds, &dx, &dy, &dz, &spread, &pitchDegrees);
+    if (fields < 2 || (hands != 1 && hands != 2) || seconds < 1.0f) {
+        LOGW("%s: expected \"hands(1|2) seconds(>=1) [dx dy dz [spread [pitchDegrees]]]\", got \"%s\"",
+             kSimPinchProperty, spec.c_str());
+        return;
+    }
+    if (!headValid_ || !quadPlaced_ || simPinchElapsed_ >= 0.0) return;
+    // Hands 35 cm in front of the head, 25 cm below it, 30 cm apart (one hand: the right one),
+    // aiming where the head looks; they pinch, hold still 0.5 s (the grab starts after 0.4 s),
+    // then move by (dx, dy, dz) m in LOCAL space, spread `spread` m further apart and pitch the aim
+    // up by pitchDegrees about the hand, hold still 0.5 s and open the pinch at `seconds`.
+    simPinchHands_ = hands;
+    simPinchSeconds_ = seconds;
+    simPinchMove_ = {dx, dy, dz};
+    simPinchSpread_ = hands == 2 ? spread : 0.0f;
+    simPinchPitch_ = pitchDegrees * 3.14159265f / 180.0f;
+    simPinchHead_ = headPose_;
+    simPinchElapsed_ = 0.0;
+    if (hands == 1) {
+        const XrQuaternionf& q = headPose_.orientation;
+        const XrPosef start{q, headPose_.position + rotate(q, {0.15f, -0.25f, -0.35f})};
+        const XrQuaternionf endQ = multiply(axisAngle(rotate(q, {1.0f, 0.0f, 0.0f}), simPinchPitch_), q);
+        const XrVector3f expected = start.position + simPinchMove_ +
+                                    rotate(endQ, rotate(conjugate(q), quadPose_.position - start.position));
+        LOGI("Simulated pinch (right hand, %.1f s%s): move (%.2f, %.2f, %.2f), pitch %.0f deg; expect the screen "
+             "at (%.2f, %.2f, %.2f)",
+             seconds, handGesturesEnabled_ ? "" : "; hand gestures are off: expect nothing", dx, dy, dz, pitchDegrees,
+             expected.x, expected.y, expected.z);
+    } else {
+        LOGI("Simulated pinch (both hands, %.1f s%s): move (%.2f, %.2f, %.2f), hands 0.30 -> %.2f m apart; expect "
+             "%.2f m wide",
+             seconds, handGesturesEnabled_ ? "" : "; hand gestures are off: expect nothing", dx, dy, dz,
+             0.3f + spread, std::clamp(placement_.width * (0.3f + spread) / 0.3f, kMinWidth, kMaxWidth));
+    }
 }
 
 void XrApp::pollDebugProperties() {
@@ -766,6 +947,11 @@ void XrApp::pollDebugProperties() {
     if (simGrab != lastSimGrabProp_) {
         lastSimGrabProp_ = simGrab;
         if (!simGrab.empty()) startSimulatedGrab(simGrab);
+    }
+    const std::string simPinch = readProperty(kSimPinchProperty);
+    if (simPinch != lastSimPinchProp_) {
+        lastSimPinchProp_ = simPinch;
+        if (!simPinch.empty()) startSimulatedPinch(simPinch);
     }
 }
 
@@ -813,6 +999,20 @@ void XrApp::applyScreenCommands() {
                  passthroughOpacity(dimmer_.requested(), dimGamma_));
             continue;
         }
+        if (c.kind == Kind::SetHandGestures) {
+            const bool on = c.a != 0;
+            std::string note;
+            if (on && !handTracker_.available()) note = " (hand tracking unavailable: " + handTracker_.unavailableReason() + ")";
+            LOGI("Mac CONTROL SET_HAND_GESTURES %s%s%s", on ? "on" : "off",
+                 on == handGesturesEnabled_ ? " (unchanged)" : "", note.c_str());
+            if (on != handGesturesEnabled_) {
+                handGesturesEnabled_ = on;
+                handTracked_[0] = handTracked_[1] = false;
+                handsUnseenSeconds_ = 0;
+                handsHintLogged_ = false;
+            }
+            continue;
+        }
         const char* name = c.kind == Kind::Recenter       ? "RECENTER"
                            : c.kind == Kind::Distance     ? "DISTANCE"
                            : c.kind == Kind::Size         ? "SIZE"
@@ -821,7 +1021,7 @@ void XrApp::applyScreenCommands() {
                            : c.kind == Kind::Orbit        ? "ORBIT"
                            : c.kind == Kind::DistanceFine ? "DISTANCE_FINE"
                                                           : "SIZE_FINE";
-        if (std::any_of(std::begin(grabs_), std::end(grabs_), [](const Grab& g) { return g.active(); })) {
+        if (screenGrabbed()) {
             if (!c.continuous()) LOGW("Mac CONTROL %s ignored while the screen is grabbed", name);
             continue;
         }
@@ -864,6 +1064,7 @@ void XrApp::applyScreenCommands() {
                 break;
             case Kind::SetCurvature:
             case Kind::SetDim:
+            case Kind::SetHandGestures:
                 break;  // handled above
         }
         // Saved like the thumbstick: half a second after the last change, so a mouse or scroll-wheel
@@ -987,26 +1188,20 @@ bool XrApp::recenter(XrTime time) {
 }
 
 void XrApp::placeInFront(const XrPosef& head) {
-    // Gravity-aligned: keep only the head's yaw; the persisted height offset sets the elevation.
-    const XrVector3f fwd = rotate(head.orientation, {0.0f, 0.0f, -1.0f});
-    float fx = fwd.x, fz = fwd.z;
-    const float len = std::sqrt(fx * fx + fz * fz);
-    if (len < 1e-3f) {
-        fx = 0.0f;
-        fz = -1.0f;
-    } else {
-        fx /= len;
-        fz /= len;
-    }
+    // Gravity-aligned: keep only the head's heading (headingOf: also right when looking straight up,
+    // e.g. lying in bed, where it is the direction of the feet); the persisted height offset sets
+    // the elevation, up to kMaxPlacementElevation.
+    const XrVector3f heading = headingOf(head.orientation);
     const float distance = placement_.distance;
-    const float height = std::clamp(placement_.heightOffset, -0.9f * distance, 0.9f * distance);
+    const float maxHeight = std::sin(kMaxPlacementElevation) * distance;
+    const float height = std::clamp(placement_.heightOffset, -maxHeight, maxHeight);
     const float horizontal = std::sqrt(distance * distance - height * height);
     anchorPosition_ = head.position;
-    anchorDirection_ = XrVector3f{fx * horizontal, height, fz * horizontal} * (1.0f / distance);
+    anchorDirection_ = XrVector3f{heading.x * horizontal, height, heading.z * horizontal} * (1.0f / distance);
     placement_.heightOffset = height;
     quadPlaced_ = true;
     updateQuadPose();
-    quadPose_.orientation = facing(quadPose_.position, anchorPosition_);
+    quadPose_.orientation = facing(quadPose_.position, anchorPosition_, rotate(head.orientation, {0.0f, 1.0f, 0.0f}));
 }
 
 void XrApp::updateQuadPose() {
@@ -1049,7 +1244,7 @@ void XrApp::renderFrame() {
         recenterAtTime_ = 0;
     }
     if (recenterRequested_ && recenter(frameState.predictedDisplayTime)) recenterRequested_ = false;
-    updateGrabs(frameState.predictedDisplayTime);
+    updateGrabs(dt, frameState.predictedDisplayTime);
     applyScreenCommands();
     if (placementDirty_) {
         // Persist half a second after the last thumbstick or Mac CONTROL change.
@@ -1106,9 +1301,10 @@ void XrApp::renderFrame() {
 
     // Curved screen: same centre and facing as the quad, arc length = width (status panel stays flat).
     const bool curved = picture && curvature_ > 0.0f;
+    const CylinderGeometry g =
+        curved ? cylinderFor(quadPose_, width, placement_.distance, curvature_, kMaxCylinderAngle) : CylinderGeometry{};
     XrCompositionLayerCylinderKHR cylinder{XR_TYPE_COMPOSITION_LAYER_CYLINDER_KHR};
     if (curved) {
-        const CylinderGeometry g = cylinderFor(quadPose_, width, placement_.distance, curvature_, kMaxCylinderAngle);
         cylinder.next = chain;
         cylinder.layerFlags = 0;  // opaque
         cylinder.space = localSpace_;
@@ -1120,11 +1316,53 @@ void XrApp::renderFrame() {
         cylinder.aspectRatio = static_cast<float>(shown.width) / static_cast<float>(std::max(shown.height, 1));
     }
 
-    const XrCompositionLayerBaseHeader* layers[2];
+    const bool showQuad = frameState.shouldRender && visible_ && quadPlaced_ && shown.swapchain != XR_NULL_HANDLE &&
+                          (picture || statusDrawn_);
+    // While grabbed: a frame of the same geometry, slightly larger, submitted just before (behind)
+    // the screen. Not submitted otherwise, so it costs nothing outside grabs.
+    const bool showHighlight = showQuad && screenGrabbed() && highlight_.swapchain != XR_NULL_HANDLE &&
+                               (highlightDrawn_ || (highlightDrawn_ = drawHighlight()));
+    const HighlightGeometry frame = highlightFrame(width, quad.size.height, curved ? g.radius : 0.0f,
+                                                   highlightBorder(placement_.width));
+    XrCompositionLayerQuad highlightQuad{XR_TYPE_COMPOSITION_LAYER_QUAD};
+    XrCompositionLayerCylinderKHR highlightCylinder{XR_TYPE_COMPOSITION_LAYER_CYLINDER_KHR};
+    const XrSwapchainSubImage highlightImage{highlight_.swapchain, {{0, 0}, {highlight_.width, highlight_.height}}, 0};
+    if (showHighlight) {
+        const XrCompositionLayerFlags flags = XR_COMPOSITION_LAYER_BLEND_TEXTURE_SOURCE_ALPHA_BIT;  // premultiplied
+        if (curved) {
+            highlightCylinder.layerFlags = flags;
+            highlightCylinder.space = localSpace_;
+            highlightCylinder.eyeVisibility = XR_EYE_VISIBILITY_BOTH;
+            highlightCylinder.subImage = highlightImage;
+            highlightCylinder.pose = g.pose;
+            highlightCylinder.radius = g.radius;
+            highlightCylinder.centralAngle = frame.centralAngle;
+            highlightCylinder.aspectRatio = frame.aspectRatio;
+        } else {
+            highlightQuad.layerFlags = flags;
+            highlightQuad.space = localSpace_;
+            highlightQuad.eyeVisibility = XR_EYE_VISIBILITY_BOTH;
+            highlightQuad.subImage = highlightImage;
+            highlightQuad.pose = quadPose_;
+            highlightQuad.size = frame.quadSize;
+        }
+        if (!highlightLogged_) {
+            highlightLogged_ = true;
+            LOGI("Highlight frame submitted (%s, %.1f cm border)", curved ? "cylinder" : "quad",
+                 100.0f * highlightBorder(placement_.width));
+        }
+    } else if (!screenGrabbed()) {
+        highlightLogged_ = false;  // log the first submission of each grab
+    }
+
+    const XrCompositionLayerBaseHeader* layers[3];
     uint32_t layerCount = 0;
     if (frameState.shouldRender && visible_) {
         layers[layerCount++] = reinterpret_cast<const XrCompositionLayerBaseHeader*>(&passthroughLayer);
-        const bool showQuad = quadPlaced_ && shown.swapchain != XR_NULL_HANDLE && (picture || statusDrawn_);
+        if (showHighlight) {
+            layers[layerCount++] = curved ? reinterpret_cast<const XrCompositionLayerBaseHeader*>(&highlightCylinder)
+                                          : reinterpret_cast<const XrCompositionLayerBaseHeader*>(&highlightQuad);
+        }
         if (showQuad) {
             layers[layerCount++] = curved ? reinterpret_cast<const XrCompositionLayerBaseHeader*>(&cylinder)
                                           : reinterpret_cast<const XrCompositionLayerBaseHeader*>(&quad);
@@ -1139,7 +1377,7 @@ void XrApp::renderFrame() {
     r = xrEndFrame(session_, &endInfo);
     if (XR_FAILED(r)) LOGE("xrEndFrame (%u layers): %s", layerCount, resultString(r).c_str());
 
-    if (picture && layerCount == 2 && framesWithPicture_++ == 0) {
+    if (picture && showQuad && framesWithPicture_++ == 0) {
         LOGI("First frame submitted with passthrough + screen layers");
     }
     if (++frameIndex_ % 720 == 0) {

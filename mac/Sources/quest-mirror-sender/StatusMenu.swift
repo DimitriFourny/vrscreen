@@ -29,6 +29,7 @@ final class StatusMenu: NSObject, NSMenuDelegate {
     private let statusLine = NSMenuItem(title: StatusMenu.statusText(forClientAddress: nil), action: nil, keyEquivalent: "")
     private var curvatureRow: SliderRow?
     private var dimRow: SliderRow?
+    private var handGesturesItem: NSMenuItem?
     private var throttle = ValueThrottle<DisplaySettings>(interval: StatusMenu.sendInterval)
     private var pendingSave: DispatchWorkItem?
     private let travelModeLine = NSMenuItem(title: TravelModeState.notOnUSB.menuTitle, action: nil, keyEquivalent: "")
@@ -78,6 +79,20 @@ final class StatusMenu: NSObject, NSMenuDelegate {
         }
         curvatureRow = curvature
         dimRow = dim
+        menu.addItem(.separator())
+        let hands = actionItem("Hand gestures", #selector(toggleHandGestures))
+        hands.state = settings.handGestures ? .on : .off
+        hands.toolTip = "Pinch and hold to move the screen, use two hands to resize it"
+        menu.addItem(hands)
+        handGesturesItem = hands
+        let hint = NSMenuItem(title: "", action: nil, keyEquivalent: "")
+        hint.attributedTitle = NSAttributedString(
+            string: "Pinch & hold to move, two hands to resize",
+            attributes: [.font: NSFont.menuFont(ofSize: NSFont.smallSystemFontSize),
+                         .foregroundColor: NSColor.secondaryLabelColor])
+        hint.isEnabled = false
+        hint.indentationLevel = 1
+        menu.addItem(hint)
         menu.addItem(.separator())
         menu.addItem(actionItem("Re-center", #selector(recenter)))
         menu.addItem(actionItem("Reset placement", #selector(resetPlacement)))
@@ -129,7 +144,8 @@ final class StatusMenu: NSObject, NSMenuDelegate {
     @objc private func sliderMoved(_ sender: NSSlider) {
         guard let curvatureRow, let dimRow else { return }
         settings = DisplaySettings(curvature: DisplaySettings.permille(fromPercent: curvatureRow.slider.doubleValue),
-                                   dim: DisplaySettings.permille(fromPercent: dimRow.slider.doubleValue))
+                                   dim: DisplaySettings.permille(fromPercent: dimRow.slider.doubleValue),
+                                   handGestures: settings.handGestures)
         curvatureRow.showValue()
         dimRow.showValue()
         let now = ProcessInfo.processInfo.systemUptime
@@ -139,12 +155,20 @@ final class StatusMenu: NSObject, NSMenuDelegate {
         case .schedule(let at):
             // The main queue keeps running while the menu tracks the mouse.
             DispatchQueue.main.asyncAfter(deadline: .now() + max(0, at - now)) { [weak self] in
-                guard let self, let value = self.throttle.fire(now: ProcessInfo.processInfo.systemUptime) else { return }
-                self.onSettingsChange(value)
+                // Send the current settings (a checkbox may have changed since the drag).
+                guard let self, self.throttle.fire(now: ProcessInfo.processInfo.systemUptime) != nil else { return }
+                self.onSettingsChange(self.settings)
             }
         case .pending:
             break
         }
+        scheduleSave()
+    }
+
+    @objc private func toggleHandGestures() {
+        settings.handGestures.toggle()
+        handGesturesItem?.state = settings.handGestures ? .on : .off
+        onSettingsChange(settings) // a single click: no throttling
         scheduleSave()
     }
 
@@ -227,7 +251,8 @@ final class StatusMenu: NSObject, NSMenuDelegate {
     private func save() {
         do {
             try store.save(settings)
-            log("menu: curvature \(settings.curvature / 10) %, dim \(settings.dim / 10) % (saved)")
+            log("menu: curvature \(settings.curvature / 10) %, dim \(settings.dim / 10) %, "
+                + "hand gestures \(settings.handGestures ? "on" : "off") (saved)")
         } catch {
             log("menu: could not save settings to \(store.url.path): \(error)")
         }

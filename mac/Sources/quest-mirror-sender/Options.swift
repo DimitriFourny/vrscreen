@@ -128,7 +128,7 @@ struct SenderOptions {
     /// Parses `cmd[:args][*N];...` with cmd one of recenter, reset, translate:DX,DY,
     /// distance:STEPS, size:STEPS (-128...127), orbit:YAW,PITCH (1/100 degree),
     /// distance_fine:V, size_fine:V (-32768...32767), curvature:N, dim:N (permille,
-    /// 0...1000), or wait:MS (pause before the next command); `*N` repeats the item.
+    /// 0...1000), hands:0|1, or wait:MS (pause before the next command); `*N` repeats the item.
     static func parseControlSpec(_ spec: String) throws -> [DebugControlStep] {
         try spec.split(separator: ";").flatMap { rawItem -> [DebugControlStep] in
             let item = rawItem.trimmingCharacters(in: .whitespaces)
@@ -163,6 +163,10 @@ struct SenderOptions {
             case "orbit": let v = try values(2, Int16.self); command = .orbit(yawCentidegrees: v[0], pitchCentidegrees: v[1])
             case "distance_fine": command = .distanceFine(try values(1, Int16.self)[0])
             case "size_fine": command = .sizeFine(try values(1, Int16.self)[0])
+            case "hands":
+                let v = try values(1, UInt8.self)[0]
+                guard v <= 1 else { throw OptionError("--debug-control-on-connect: '\(item)' must be hands:0 or hands:1") }
+                command = .setHandGestures(v == 1)
             case "curvature", "dim":
                 let v = try values(1, UInt16.self)[0]
                 guard v <= ControlCommand.permilleMax else {

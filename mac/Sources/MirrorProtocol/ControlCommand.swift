@@ -26,6 +26,8 @@ public enum ControlCommand: Equatable, Sendable, CustomStringConvertible {
     /// Absolute dimming of the surroundings (passthrough) in permille: 0 = normal,
     /// 1000 = black. Never dims the screen. Receivers clamp to 1000.
     case setDim(UInt16)
+    /// Absolute: whether the client reacts to hand input at all (off = ignored entirely).
+    case setHandGestures(Bool)
     /// A command this implementation does not know; receivers ignore it.
     case unknown(command: UInt8, args: Data)
 
@@ -39,6 +41,7 @@ public enum ControlCommand: Equatable, Sendable, CustomStringConvertible {
     public static let sizeFineCode: UInt8 = 0x09
     public static let setCurvatureCode: UInt8 = 0x0A
     public static let setDimCode: UInt8 = 0x0B
+    public static let setHandGesturesCode: UInt8 = 0x0C
     /// Upper end of SET_CURVATURE / SET_DIM values.
     public static let permilleMax: UInt16 = 1000
 
@@ -47,6 +50,7 @@ public enum ControlCommand: Equatable, Sendable, CustomStringConvertible {
         var data = Data()
         switch self {
         case .recenter: data.append(Self.recenterCode)
+        case .setHandGestures(let enabled): data.append(contentsOf: [Self.setHandGesturesCode, enabled ? 1 : 0])
         case .distance(let steps): data.append(contentsOf: [Self.distanceCode, UInt8(bitPattern: steps)])
         case .size(let steps): data.append(contentsOf: [Self.sizeCode, UInt8(bitPattern: steps)])
         case .reset: data.append(Self.resetCode)
@@ -97,6 +101,9 @@ public enum ControlCommand: Equatable, Sendable, CustomStringConvertible {
         case distanceCode: return .distance(steps: try i8())
         case sizeCode: return .size(steps: try i8())
         case resetCode: return .reset
+        case setHandGesturesCode:
+            guard let v = r.u8() else { throw missing }
+            return .setHandGestures(v != 0) // any nonzero value means on
         case translateCode: return .translate(dx: try i8(), dy: try i8())
         case orbitCode: return .orbit(yawCentidegrees: try i16(), pitchCentidegrees: try i16())
         case distanceFineCode: return .distanceFine(try i16())
@@ -112,6 +119,7 @@ public enum ControlCommand: Equatable, Sendable, CustomStringConvertible {
         func signed<T: SignedInteger>(_ v: T) -> String { v > 0 ? "+\(v)" : "\(v)" }
         func degrees(_ v: Int16) -> String { String(format: "%+.2f°", Double(v) / 100) }
         switch self {
+        case .setHandGestures(let enabled): return "SET_HAND_GESTURES \(enabled ? "on" : "off")"
         case .recenter: return "RECENTER"
         case .distance(let steps): return "DISTANCE \(signed(steps))"
         case .size(let steps): return "SIZE \(signed(steps))"

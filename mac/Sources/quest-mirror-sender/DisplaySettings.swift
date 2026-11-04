@@ -1,30 +1,35 @@
 import Foundation
 import MirrorProtocol
 
-/// Screen curvature and surroundings dimming, owned by the sender (the source of
-/// truth): sent to every client on connect and on every change, kept across restarts.
+/// Screen curvature, surroundings dimming and hand gestures, owned by the sender (the
+/// source of truth): sent to every client on connect and on every change, kept across restarts.
 struct DisplaySettings: Codable, Equatable {
     /// Permille, 0 (flat) ... 1000.
     var curvature: UInt16
     /// Permille, 0 (normal passthrough) ... 1000 (black).
     var dim: UInt16
+    /// Whether the headset reacts to hand input (pinch & hold to move, two hands to resize).
+    var handGestures: Bool
 
-    static let defaults = DisplaySettings(curvature: 0, dim: 0)
+    static let defaults = DisplaySettings(curvature: 0, dim: 0, handGestures: false)
 
-    init(curvature: UInt16, dim: UInt16) {
+    init(curvature: UInt16, dim: UInt16, handGestures: Bool = false) {
         self.curvature = min(curvature, ControlCommand.permilleMax)
         self.dim = min(dim, ControlCommand.permilleMax)
+        self.handGestures = handGestures
     }
 
-    /// Out-of-range values in a hand-edited file are clamped, not rejected.
+    /// Out-of-range values in a hand-edited file are clamped, not rejected; missing keys
+    /// (e.g. files written before a setting existed) take the defaults.
     init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
         self.init(curvature: try c.decodeIfPresent(UInt16.self, forKey: .curvature) ?? 0,
-                  dim: try c.decodeIfPresent(UInt16.self, forKey: .dim) ?? 0)
+                  dim: try c.decodeIfPresent(UInt16.self, forKey: .dim) ?? 0,
+                  handGestures: try c.decodeIfPresent(Bool.self, forKey: .handGestures) ?? false)
     }
 
     /// CONTROL messages that put a client in this state.
-    var commands: [ControlCommand] { [.setCurvature(curvature), .setDim(dim)] }
+    var commands: [ControlCommand] { [.setCurvature(curvature), .setDim(dim), .setHandGestures(handGestures)] }
 
     /// Slider percentage (0...100) → permille.
     static func permille(fromPercent percent: Double) -> UInt16 {

@@ -2,6 +2,8 @@
 
 #include "dim_controller.h"
 #include "grab.h"
+#include "hand_gestures.h"
+#include "hand_tracker.h"
 #include "screen_source.h"
 #include "status_panel.h"
 
@@ -82,9 +84,14 @@ private:
     void updateVisibility();
     void logInteractionProfiles();
     void pollInput(double dtSeconds, XrTime time);
-    // Runs the grabbers (controller grips, debug simulation) and moves the screen while held.
-    void updateGrabs(XrTime time);
+    // Runs the grabbers (controller grips, hand gestures, debug simulations) and moves the screen
+    // while held. One grabber at a time: the first wins.
+    void updateGrabs(double dtSeconds, XrTime time);
+    // Hand samples for this frame: the debug.questmirror.simpinch script while it runs, else tracking.
+    void readHands(double dtSeconds, XrTime time, HandSample hands[2]);
+    bool screenGrabbed() const;
     void onGrabReleased(const char* who);
+    XrVector3f headUp() const;
     // Puts the screen centre at `position`, re-deriving direction/distance/height offset from the
     // anchor; `faceAnchor` turns it towards the anchor, otherwise its orientation is kept.
     void moveScreenTo(const XrVector3f& position, bool faceAnchor);
@@ -103,6 +110,9 @@ private:
     void savePlacement();
     void setFilterMode(int32_t mode, const char* reason);
     void startSimulatedGrab(const std::string& spec);
+    void startSimulatedPinch(const std::string& spec);
+    // Fills the highlight frame's Surface with the accent colour (once).
+    bool drawHighlight();
     bool filterModeSupported(int32_t mode) const;
     std::string resultString(XrResult result) const;
     std::string pathString(XrPath path) const;
@@ -117,6 +127,8 @@ private:
     bool hasLayerSettings_ = false;  // XR_FB_composition_layer_settings
     bool hasAutoFilter_ = false;     // XR_META_automatic_layer_filter
     bool hasImageLayout_ = false;    // XR_FB_composition_layer_image_layout
+    bool hasHandTracking_ = false;   // XR_EXT_hand_tracking
+    bool hasHandTrackingAim_ = false;  // XR_FB_hand_tracking_aim
     PFN_xrGetOpenGLESGraphicsRequirementsKHR pfnGetOpenGLESGraphicsRequirementsKHR = nullptr;
     PFN_xrCreateSwapchainAndroidSurfaceKHR pfnCreateSwapchainAndroidSurfaceKHR = nullptr;
     PFN_xrCreatePassthroughFB pfnCreatePassthroughFB = nullptr;
@@ -192,6 +204,28 @@ private:
     int simGrabStep_ = 0;  // > 0 while a simulated grab runs (frames left)
     XrPosef simGrabStart_{{0, 0, 0, 1}, {0, 0, 0}};
     XrPosef simGrabEnd_{{0, 0, 0, 1}, {0, 0, 0}};
+
+    // Hand gestures (SET_HAND_GESTURES from the Mac; off until it arrives, never persisted here).
+    HandTracker handTracker_;
+    HandGestures handGestures_;
+    bool handGesturesEnabled_ = false;
+    bool handTracked_[2] = {false, false};  // for logging changes
+    double handsUnseenSeconds_ = 0;         // enabled, focused and no hand tracked: hint once
+    bool handsHintLogged_ = false;
+    // debug.questmirror.simpinch: scripted pinch through HandGestures (see startSimulatedPinch).
+    double simPinchElapsed_ = -1;  // < 0: not running
+    double simPinchSeconds_ = 0;
+    int simPinchHands_ = 1;
+    XrVector3f simPinchMove_{0, 0, 0};
+    float simPinchSpread_ = 0;
+    float simPinchPitch_ = 0;  // radians
+    XrPosef simPinchHead_{{0, 0, 0, 1}, {0, 0, 0}};
+
+    // Highlight frame behind the screen while it is grabbed (solid accent colour; not submitted
+    // otherwise).
+    SurfaceSwapchain highlight_;
+    bool highlightDrawn_ = false;
+    bool highlightLogged_ = false;
     int32_t filterMode_ = 0;
 
     // Stats / debug controls
@@ -203,6 +237,7 @@ private:
     std::string lastDistanceProp_;
     std::string lastWidthProp_;
     std::string lastSimGrabProp_;
+    std::string lastSimPinchProp_;
     std::string lastDimGammaProp_;
     uint32_t controlBurstCount_ = 0;  // continuous Mac CONTROL commands since the last save
     XrPosef controlBurstStart_{{0, 0, 0, 1}, {0, 0, 0}};

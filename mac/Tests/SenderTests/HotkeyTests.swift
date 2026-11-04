@@ -65,15 +65,16 @@ private func hotkeyEvent(_ kind: Int, index: UInt32) -> EventRef {
     let commands: [ControlCommand] = [
         .translate(dx: 1, dy: 0), .orbit(yawCentidegrees: 500, pitchCentidegrees: -250), .distance(steps: 2),
         .distanceFine(-25), .size(steps: -1), .sizeFine(30), .recenter, .reset, .setCurvature(1000), .setDim(0),
+        .setHandGestures(true), .setHandGestures(false),
     ]
     #expect(try SenderOptions.parseControlSpec(
-        "translate:1,0; orbit:500,-250;distance:2;distance_fine:-25;size:-1;size_fine:30;recenter;reset;curvature:1000;dim:0")
+        "translate:1,0; orbit:500,-250;distance:2;distance_fine:-25;size:-1;size_fine:30;recenter;reset;curvature:1000;dim:0;hands:1;hands:0")
         == commands.map { .send($0) })
     #expect(try SenderOptions.parseControlSpec("orbit:50,0*2;wait:1500;dim:500")
         == [.send(.orbit(yawCentidegrees: 50, pitchCentidegrees: 0)), .send(.orbit(yawCentidegrees: 50, pitchCentidegrees: 0)),
             .wait(milliseconds: 1500), .send(.setDim(500))])
     for bad in ["move:1,0", "translate:1", "size:200", "orbit:40000,0", "spin", "recenter:1", "distance:x",
-                "reset*0", "reset*x", "curvature:1001", "dim:-1", "wait", "wait:-5"] {
+                "reset*0", "reset*x", "curvature:1001", "dim:-1", "wait", "wait:-5", "hands:2", "hands"] {
         #expect(throws: OptionError.self) { try SenderOptions.parseControlSpec(bad) }
     }
 }

@@ -16,6 +16,8 @@ add_library(questmirror SHARED
     main.cpp
     xr_app.cpp
     grab.cpp
+    hand_gestures.cpp
+    hand_tracker.cpp
     status_panel.cpp
     bitmap_font.cpp
     stream_client.cpp

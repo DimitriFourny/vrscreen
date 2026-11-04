@@ -137,13 +137,14 @@ final class MirrorServer {
         return client.address
     }
 
-    /// Records new curvature/dim and sends the changed value(s) to the active client.
+    /// Records new settings and sends the changed value(s) to the active client.
     func updateDisplaySettings(_ settings: DisplaySettings) {
         let old = displaySettings
         displaySettings = settings
         guard let client = activeClient else { return }
-        if settings.curvature != old.curvature { send(.control(.setCurvature(settings.curvature)), to: client) }
-        if settings.dim != old.dim { send(.control(.setDim(settings.dim)), to: client) }
+        for (new, previous) in zip(settings.commands, old.commands) where new != previous {
+            send(.control(new), to: client)
+        }
     }
 
     // MARK: Connections

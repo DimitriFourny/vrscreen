@@ -10,7 +10,8 @@ namespace qm {
 
 // A change to the screen's placement or presentation requested remotely (the Mac's shortcuts and
 // menu-bar icon, protocol CONTROL). The continuous kinds arrive as a stream (mouse, scroll wheel)
-// of small deltas; SetCurvature/SetDim carry absolute values the Mac re-sends on every connect.
+// of small deltas; SetCurvature/SetDim/SetHandGestures carry absolute values the Mac re-sends on
+// every connect.
 struct ScreenCommand {
     enum class Kind : uint8_t {
         Recenter,      // in front of the current head direction, same distance/size
@@ -21,8 +22,9 @@ struct ScreenCommand {
         Orbit,         // continuous: around the head by a/100 deg yaw (+ = right), b/100 deg pitch (+ = up)
         DistanceFine,  // continuous: distance x 1.1^(a/100)
         SizeFine,      // continuous: width x 1.1^(a/100)
-        SetCurvature,  // a = 0..1000 permille: 0 flat, 1000 = cylinder centred on the viewer
-        SetDim,        // a = 0..1000 permille darkening of the passthrough surroundings (not the screen)
+        SetCurvature,     // a = 0..1000 permille: 0 flat, 1000 = cylinder centred on the viewer
+        SetDim,           // a = 0..1000 permille darkening of the passthrough surroundings (not the screen)
+        SetHandGestures,  // a != 0: hand-tracking gestures on (pinch to grab, two hands to resize)
     };
     Kind kind = Kind::Recenter;
     int16_t a = 0;

@@ -179,7 +179,7 @@ if (( mouse )); then
     say "Hold ⌃⌥⌘ and move the mouse to orbit it around you; ⌃⌥⌘ + scroll: closer/farther, ⌃⌥⌘⇧ + scroll: bigger/smaller"
 fi
 if (( menu )); then
-    say "Menu-bar icon (goggles): curved screen and dim-surroundings sliders, re-center, reset, travel mode (USB), quit"
+    say "Menu-bar icon (goggles): curved screen and dim-surroundings sliders, hand gestures, re-center, reset, travel mode (USB), quit"
 fi
 
 # 5. Sender in the foreground. Ctrl-C reaches it directly; it shuts down cleanly and
