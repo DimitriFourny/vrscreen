@@ -159,11 +159,24 @@ final class MirrorServer {
                 send(.config(config), to: client)
                 client.sentConfig = config
             }
-            for command in controlOnConnect {
-                send(.control(command), to: client)
-                log("server: sent CONTROL \(command) to \(client.address) (--debug-control-on-connect)")
-            }
+            if !controlOnConnect.isEmpty { sendControlOnConnect(to: client) }
             onClientReady?(client)
+        }
+    }
+
+    /// --debug-control-on-connect: the first command goes out right after the hello,
+    /// the rest one per 1/60 s (like a 60 Hz mouse gesture), while the client stays connected.
+    private func sendControlOnConnect(to client: ClientSession) {
+        let commands = controlOnConnect
+        log("server: sending \(commands.count) CONTROL command(s) to \(client.address) at 60 Hz (--debug-control-on-connect)")
+        for (index, command) in commands.enumerated() {
+            queue.asyncAfter(deadline: .now() + .microseconds(index * 16_667)) { [weak self, weak client] in
+                guard let self, let client, client.isActive else { return }
+                self.send(.control(command), to: client)
+                if index == commands.count - 1 {
+                    log("server: sent \(commands.count) CONTROL command(s) to \(client.address), last: \(command)")
+                }
+            }
         }
     }
 

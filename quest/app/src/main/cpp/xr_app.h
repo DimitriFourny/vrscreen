@@ -84,6 +84,11 @@ private:
     // Runs the grabbers (controller grips, debug simulation) and moves the screen while held.
     void updateGrabs(XrTime time);
     void onGrabReleased(const char* who);
+    // Puts the screen centre at `position`, re-deriving direction/distance/height offset from the
+    // anchor; `faceAnchor` turns it towards the anchor, otherwise its orientation is kept.
+    void moveScreenTo(const XrVector3f& position, bool faceAnchor);
+    // Logs the pending stream of continuous Mac CONTROL commands as one before -> after line.
+    void flushControlBurstLog();
     void pollDebugProperties();
     bool recenter(XrTime time);
     // Screen in front of `head` (yaw only) at the current distance and height offset.
@@ -187,6 +192,10 @@ private:
     std::string lastDistanceProp_;
     std::string lastWidthProp_;
     std::string lastSimGrabProp_;
+    uint32_t controlBurstCount_ = 0;  // continuous Mac CONTROL commands since the last save
+    XrPosef controlBurstStart_{{0, 0, 0, 1}, {0, 0, 0}};
+    PlacementCommand::Kind controlBurstKind_ = PlacementCommand::Kind::Orbit;
+    const char* controlBurstName_ = "";
 };
 
 }  // namespace qm

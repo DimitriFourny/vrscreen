@@ -142,10 +142,12 @@ fi
 # 4. How the headset will connect.
 discovery=1
 hotkeys=1
+mouse=1
 for arg in ${SENDER_ARGS[@]+"${SENDER_ARGS[@]}"}; do
     case "$arg" in
         --no-discovery) discovery=0 ;;
         --no-hotkeys) hotkeys=0 ;;
+        --no-mouse) mouse=0 ;;
     esac
 done
 addresses=""
@@ -165,7 +167,10 @@ if (( !USB )) && (( LAUNCH )); then
     say "Start Quest Mirror on the headset (same Wi-Fi network as this Mac)"
 fi
 if (( hotkeys )); then
-    say "Place the screen from any app: ⌃⌥⌘ arrows move it, ⌃⌥⌘⇧ ↑/↓ farther/closer, ⌃⌥⌘⇧ →/← bigger/smaller, ⌃⌥⌘R recenter, ⌃⌥⌘0 reset"
+    say "Place the screen from any app: ⌃⌥⌘ arrows slide it, ⌃⌥⌘⇧ ↑/↓ farther/closer, ⌃⌥⌘⇧ →/← bigger/smaller, ⌃⌥⌘R recenter, ⌃⌥⌘0 reset"
+fi
+if (( mouse )); then
+    say "Hold ⌃⌥⌘ and move the mouse to orbit it around you; ⌃⌥⌘ + scroll: closer/farther, ⌃⌥⌘⇧ + scroll: bigger/smaller"
 fi
 
 # 5. Sender in the foreground. Ctrl-C reaches it directly; it shuts down cleanly and

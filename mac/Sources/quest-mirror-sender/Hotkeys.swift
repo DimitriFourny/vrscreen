@@ -16,14 +16,15 @@ struct HotkeyBinding: Equatable {
     static let base = UInt32(controlKey | optionKey | cmdKey)
     static let shifted = base | UInt32(shiftKey)
 
-    /// ⌃⌥⌘ + arrows move the screen; adding ⇧ turns ↑/↓ into distance and →/← into
+    /// ⌃⌥⌘ + arrows slide the screen; adding ⇧ turns ↑/↓ into distance and →/← into
     /// size. Arrows, R and 0 sit in the same place on QWERTY and AZERTY, unlike
-    /// `[ ] = -`, which AZERTY puts on other keys or behind dead keys.
+    /// `[ ] = -`, which AZERTY puts on other keys or behind dead keys. (⌃⌥⌘ + mouse
+    /// orbits and ⌃⌥⌘ + scroll zooms: see MouseControl.)
     static let all: [HotkeyBinding] = [
-        HotkeyBinding(keyCode: UInt32(kVK_LeftArrow), modifiers: base, label: "⌃⌥⌘←", command: .move(dx: -1, dy: 0), repeats: true),
-        HotkeyBinding(keyCode: UInt32(kVK_RightArrow), modifiers: base, label: "⌃⌥⌘→", command: .move(dx: 1, dy: 0), repeats: true),
-        HotkeyBinding(keyCode: UInt32(kVK_UpArrow), modifiers: base, label: "⌃⌥⌘↑", command: .move(dx: 0, dy: 1), repeats: true),
-        HotkeyBinding(keyCode: UInt32(kVK_DownArrow), modifiers: base, label: "⌃⌥⌘↓", command: .move(dx: 0, dy: -1), repeats: true),
+        HotkeyBinding(keyCode: UInt32(kVK_LeftArrow), modifiers: base, label: "⌃⌥⌘←", command: .translate(dx: -1, dy: 0), repeats: true),
+        HotkeyBinding(keyCode: UInt32(kVK_RightArrow), modifiers: base, label: "⌃⌥⌘→", command: .translate(dx: 1, dy: 0), repeats: true),
+        HotkeyBinding(keyCode: UInt32(kVK_UpArrow), modifiers: base, label: "⌃⌥⌘↑", command: .translate(dx: 0, dy: 1), repeats: true),
+        HotkeyBinding(keyCode: UInt32(kVK_DownArrow), modifiers: base, label: "⌃⌥⌘↓", command: .translate(dx: 0, dy: -1), repeats: true),
         HotkeyBinding(keyCode: UInt32(kVK_UpArrow), modifiers: shifted, label: "⌃⌥⌘⇧↑", command: .distance(steps: 1), repeats: true),
         HotkeyBinding(keyCode: UInt32(kVK_DownArrow), modifiers: shifted, label: "⌃⌥⌘⇧↓", command: .distance(steps: -1), repeats: true),
         HotkeyBinding(keyCode: UInt32(kVK_RightArrow), modifiers: shifted, label: "⌃⌥⌘⇧→", command: .size(steps: 1), repeats: true),

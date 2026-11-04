@@ -589,26 +589,36 @@ bool StreamClient::handleMessage(uint8_t type, const uint8_t* payload, uint32_t 
             return true;
         }
         case kMsgControl: {
-            // command u8 | args; unknown commands and extra bytes are ignored.
+            // command u8 | args (i8 or big-endian i16); unknown commands and extra bytes are ignored.
             if (length < 1) return true;
+            using Kind = PlacementCommand::Kind;
             PlacementCommand command;
-            uint32_t needed = 1;
+            int args = 0;     // number of arguments
+            int argSize = 1;  // bytes per argument
             switch (payload[0]) {
-                case 0x01: command.kind = PlacementCommand::Kind::Recenter; break;
-                case 0x02: command.kind = PlacementCommand::Kind::Move; needed = 3; break;
-                case 0x03: command.kind = PlacementCommand::Kind::Distance; needed = 2; break;
-                case 0x04: command.kind = PlacementCommand::Kind::Size; needed = 2; break;
-                case 0x05: command.kind = PlacementCommand::Kind::Reset; break;
-                default:
+                case 0x01: command.kind = Kind::Recenter; break;
+                case 0x03: command.kind = Kind::Distance; args = 1; break;
+                case 0x04: command.kind = Kind::Size; args = 1; break;
+                case 0x05: command.kind = Kind::Reset; break;
+                case 0x06: command.kind = Kind::Translate; args = 2; break;
+                case 0x07: command.kind = Kind::Orbit; args = 2; argSize = 2; break;
+                case 0x08: command.kind = Kind::DistanceFine; args = 1; argSize = 2; break;
+                case 0x09: command.kind = Kind::SizeFine; args = 1; argSize = 2; break;
+                default:  // includes 0x02, the removed MOVE
                     LOGI("CONTROL: unknown command 0x%02x ignored", payload[0]);
                     return true;
             }
+            const uint32_t needed = 1 + static_cast<uint32_t>(args * argSize);
             if (length < needed) {
                 LOGW("CONTROL 0x%02x: %u byte(s), needs %u; ignored", payload[0], length, needed);
                 return true;
             }
-            if (needed >= 2) command.a = static_cast<int8_t>(payload[1]);
-            if (needed >= 3) command.b = static_cast<int8_t>(payload[2]);
+            auto arg = [&](int i) -> int16_t {
+                const uint8_t* p = payload + 1 + i * argSize;
+                return argSize == 1 ? static_cast<int8_t>(p[0]) : static_cast<int16_t>(readU16(p));
+            };
+            if (args >= 1) command.a = arg(0);
+            if (args >= 2) command.b = arg(1);
             listener_.onControl(command);
             return true;
         }

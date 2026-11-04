@@ -9,10 +9,10 @@ private let shifted = base | UInt32(shiftKey)
 
 @Test func shortcutTableMapsPhysicalKeysToCommands() {
     let expected: [(Int, UInt32, ControlCommand, Bool)] = [
-        (kVK_LeftArrow, base, .move(dx: -1, dy: 0), true),
-        (kVK_RightArrow, base, .move(dx: 1, dy: 0), true),
-        (kVK_UpArrow, base, .move(dx: 0, dy: 1), true),
-        (kVK_DownArrow, base, .move(dx: 0, dy: -1), true),
+        (kVK_LeftArrow, base, .translate(dx: -1, dy: 0), true),
+        (kVK_RightArrow, base, .translate(dx: 1, dy: 0), true),
+        (kVK_UpArrow, base, .translate(dx: 0, dy: 1), true),
+        (kVK_DownArrow, base, .translate(dx: 0, dy: -1), true),
         (kVK_UpArrow, shifted, .distance(steps: 1), true),
         (kVK_DownArrow, shifted, .distance(steps: -1), true),
         (kVK_RightArrow, shifted, .size(steps: 1), true),
@@ -41,7 +41,7 @@ private func hotkeyEvent(_ kind: Int, index: UInt32) -> EventRef {
 @Test func pressFiresOnceAndSystemRepeatsAreIgnored() {
     var fired: [(ControlCommand, Bool)] = []
     let controller = HotkeyController { binding, isRepeat in fired.append((binding.command, isRepeat)) }
-    let right = UInt32(HotkeyBinding.all.firstIndex { $0.command == .move(dx: 1, dy: 0) }!)
+    let right = UInt32(HotkeyBinding.all.firstIndex { $0.command == .translate(dx: 1, dy: 0) }!)
     let recenter = UInt32(HotkeyBinding.all.firstIndex { $0.command == .recenter }!)
 
     #expect(controller.handle(hotkeyEvent(kEventHotKeyPressed, index: right)) == noErr)
@@ -50,7 +50,7 @@ private func hotkeyEvent(_ kind: Int, index: UInt32) -> EventRef {
     #expect(controller.handle(hotkeyEvent(kEventHotKeyPressed, index: recenter)) == noErr)
     #expect(controller.handle(hotkeyEvent(kEventHotKeyPressed, index: recenter)) == noErr)
     #expect(controller.handle(hotkeyEvent(kEventHotKeyReleased, index: recenter)) == noErr)
-    #expect(fired.map(\.0) == [.move(dx: 1, dy: 0), .recenter])
+    #expect(fired.map(\.0) == [.translate(dx: 1, dy: 0), .recenter])
     #expect(fired.allSatisfy { !$0.1 })
 
     // Events that are not ours are passed on.
@@ -62,9 +62,15 @@ private func hotkeyEvent(_ kind: Int, index: UInt32) -> EventRef {
 }
 
 @Test func debugControlSpecParsing() throws {
-    #expect(try SenderOptions.parseControlSpec("move:1,0; move:0,-1;distance:2;size:-1;recenter;reset")
-        == [.move(dx: 1, dy: 0), .move(dx: 0, dy: -1), .distance(steps: 2), .size(steps: -1), .recenter, .reset])
-    for bad in ["move:1", "size:200", "spin", "recenter:1", "distance:x"] {
+    #expect(try SenderOptions.parseControlSpec(
+        "translate:1,0; orbit:500,-250;distance:2;distance_fine:-25;size:-1;size_fine:30;recenter;reset")
+        == [.translate(dx: 1, dy: 0), .orbit(yawCentidegrees: 500, pitchCentidegrees: -250), .distance(steps: 2),
+            .distanceFine(-25), .size(steps: -1), .sizeFine(30), .recenter, .reset])
+    #expect(try SenderOptions.parseControlSpec("orbit:50,0*3;reset")
+        == [.orbit(yawCentidegrees: 50, pitchCentidegrees: 0), .orbit(yawCentidegrees: 50, pitchCentidegrees: 0),
+            .orbit(yawCentidegrees: 50, pitchCentidegrees: 0), .reset])
+    for bad in ["move:1,0", "translate:1", "size:200", "orbit:40000,0", "spin", "recenter:1", "distance:x",
+                "reset*0", "reset*x"] {
         #expect(throws: OptionError.self) { try SenderOptions.parseControlSpec(bad) }
     }
 }

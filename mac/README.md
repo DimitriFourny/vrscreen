@@ -65,7 +65,10 @@ Stop either with Ctrl-C.
 | `--max-in-flight N`        | 3       | For clients that send FRAME_ACK: max frames sent but not yet consumed |
 | `--width N --height N`     | 1920x1080 | Test-pattern size                                          |
 | `--no-hotkeys`             | off     | Do not register the global screen-placement shortcuts        |
-| `--debug-control-on-connect SPEC` | none | Testing: send CONTROL commands to each client on connect, e.g. `"move:1,0;distance:-2;size:1;recenter;reset"` |
+| `--no-mouse`               | off     | Do not use ⌃⌥⌘ + mouse (orbit) / scroll (zoom)               |
+| `--mouse-sensitivity DEG`  | 0.1     | Orbit degrees per point of mouse movement                    |
+| `--scroll-sensitivity X`   | 1       | Scroll zoom multiplier (a wheel notch is a quarter step)     |
+| `--debug-control-on-connect SPEC` | none | Testing: CONTROL commands sent to each client on connect, paced at 60 Hz, e.g. `"translate:1,0;orbit:50,0*50;distance_fine:-25;size_fine:30;recenter"` |
 
 Once per second it logs capture fps, encoded fps (and keyframes), captures skipped by
 backpressure, the bitrate actually sent, and the client with its unsent backlog and,
@@ -89,35 +92,61 @@ Once per second it logs received and decoded fps, bitrate, capture→decoded lat
 it), the last PING round trip, and the stream format. It acknowledges every FRAME
 (FRAME_ACK) as it hands it to the decoder, and reconnects every second while the
 sender is unreachable or after the sender restarts. CONTROL messages are printed
-(`control: MOVE dx=+1 dy=0`).
+(`control: TRANSLATE dx=+1 dy=0`, `control: ORBIT yaw=+0.50° pitch=+0.00°`).
 
-## Placing the screen: global shortcuts
+## Placing the screen: shortcuts and mouse
 
-While the sender runs, these shortcuts work from any app and move the screen in the
-headset (they send CONTROL messages to the connected client; with no client the
-sender logs and drops them):
+While the sender runs, these work from any app and move the screen in the headset
+(they send CONTROL messages to the connected client; with no client the sender logs and
+drops them):
 
-| Shortcut     | Action                                   | Held down |
-|--------------|------------------------------------------|-----------|
-| ⌃⌥⌘ ← / →    | Move the screen left / right (5° steps)  | repeats   |
-| ⌃⌥⌘ ↑ / ↓    | Move the screen up / down (5° steps)     | repeats   |
-| ⌃⌥⌘⇧ ↑ / ↓   | Farther / closer (×1.1 per step)         | repeats   |
-| ⌃⌥⌘⇧ → / ←   | Bigger / smaller (×1.1 per step)         | repeats   |
-| ⌃⌥⌘ R        | Recenter in front of where you look      | —         |
-| ⌃⌥⌘ 0        | Reset distance and size, and recenter    | —         |
+| Input              | Action                                             | Held down |
+|--------------------|----------------------------------------------------|-----------|
+| ⌃⌥⌘ ← / →          | Slide the screen left / right (5 cm steps)         | repeats   |
+| ⌃⌥⌘ ↑ / ↓          | Slide the screen up / down (5 cm steps)            | repeats   |
+| ⌃⌥⌘⇧ ↑ / ↓         | Farther / closer (×1.1 per step)                   | repeats   |
+| ⌃⌥⌘⇧ → / ←         | Bigger / smaller (×1.1 per step)                   | repeats   |
+| ⌃⌥⌘ R              | Recenter in front of where you look                | —         |
+| ⌃⌥⌘ 0              | Reset distance and size, and recenter              | —         |
+| ⌃⌥⌘ + move mouse   | Orbit the screen around your head (0.1° per point) | continuous |
+| ⌃⌥⌘ + scroll       | Scroll up / away: closer; down / toward you: farther | continuous |
+| ⌃⌥⌘⇧ + scroll      | Scroll up / away: bigger; down / toward you: smaller | continuous |
 
-(⌃ control, ⌥ option, ⌘ command, ⇧ shift; step sizes are the Quest app's.) Held keys
-repeat after 300 ms, every 80 ms. Shortcuts are physical keys, so they are the same on
-QWERTY and AZERTY: arrows, the R key, and the 0 key of the number row (`à`/`0` on a
-French keyboard). `[ ] = -` were avoided because AZERTY puts them behind dead keys or
-on other keys.
+(⌃ control, ⌥ option, ⌘ command, ⇧ shift; step sizes are the Quest app's.)
 
-They use Carbon `RegisterEventHotKey`, which needs no Accessibility or Input
-Monitoring permission. The sender runs an AppKit event loop for them as a background
-(accessory) app: no Dock icon, no menu bar. Registration is exclusive: if another app
-(or a second sender) already owns a combination, the sender logs
+**Keys.** Held keys repeat after 300 ms, every 80 ms. Shortcuts are physical keys, so
+they are the same on QWERTY and AZERTY: arrows, the R key, and the 0 key of the number
+row (`à`/`0` on a French keyboard). `[ ] = -` were avoided because AZERTY puts them
+behind dead keys or on other keys. They use Carbon `RegisterEventHotKey`, which needs
+no Accessibility or Input Monitoring permission. Registration is exclusive: if another
+app (or a second sender) already owns a combination, the sender logs
 `hotkeys: could not register ⌃⌥⌘← (taken by another app)` at startup and keeps running
-without it. Every press is logged, e.g. `hotkey ⌃⌥⌘→ → MOVE dx=+1 dy=0 → 192.168.1.35:51234`.
+without it. Every press is logged, e.g. `hotkey ⌃⌥⌘→ → TRANSLATE dx=+1 dy=0 → 192.168.1.35:51234`.
+
+**Mouse and scroll.** Orbit uses the mouse's movement deltas, not the cursor position,
+and only while exactly ⌃⌥⌘ is held (with ⇧, the mouse does nothing and scroll resizes).
+Scroll follows the physical gesture whatever the "natural scrolling" setting: a wheel
+notch is a quarter step (×1.1^0.25), a 200-point trackpad swipe one step; trackpad
+inertia after lifting the fingers is ignored. Input is coalesced to at most 60 messages
+per second, and the log shows one summary line per second of activity (e.g.
+`mouse: ORBIT ×42 Σ yaw +12.30° pitch -1.10°`).
+
+- Without Accessibility (the normal case) the sender only observes mouse and scroll
+  with a global event monitor, which needs no permission: the startup log says
+  `mouse: observe-only (scroll passes through to apps)`. Apps under the cursor still
+  receive the scroll, so scroll over something that ignores it (the desktop, a window's
+  title bar). While exactly ⌃⌥⌘ is held the cursor is frozen in place
+  (`CGAssociateMouseAndMouseCursorPosition`), so orbiting doesn't drag it across the
+  screen; it is released when the keys are, and on every exit path (normal exit,
+  Ctrl-C, SIGTERM/SIGHUP, crash signals). Only `kill -9` can't be covered.
+- If the terminal app running the sender already has Accessibility permission (the
+  sender never asks for it), it uses an event tap instead and swallows those mouse and
+  scroll events while ⌃⌥⌘ is held: `mouse: event tap, events swallowed …`.
+- The modifier state is polled 60 times a second from the session (no permission
+  needed). `--no-mouse` turns all of this off.
+
+The sender runs an AppKit event loop for shortcuts and mouse as a background
+(accessory) app: no Dock icon, no menu bar.
 
 ## Screen Recording permission
 

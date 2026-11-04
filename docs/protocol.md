@@ -184,31 +184,40 @@ One encoded picture.
 ### `0x03` CONTROL (server → client)
 
 Asks the client to move the virtual screen (the Mac sender sends these from its global
-keyboard shortcuts). Sent to the current client only, as soon as the user acts; it is
-not subject to the frame windows of "Flow control".
+keyboard shortcuts and ⌃⌥⌘ mouse/scroll gestures). Sent to the current client only,
+as soon as the user acts; it is not subject to the frame windows of "Flow control".
 
 | Payload offset | Size | Field   | Notes                         |
 |---------------:|-----:|---------|-------------------------------|
 | 0              | 1    | command | `u8`, see below               |
 | 1              | rest | args    | command-specific, see below   |
 
-| Command | Name     | Args                | Meaning |
-|---------|----------|---------------------|---------|
-| `0x01`  | RECENTER | none                | Place the screen in front of the current head direction, keeping its distance and size. |
-| `0x02`  | MOVE     | `dx i8`, `dy i8`    | Rotate the screen around the user by `dx` yaw steps (positive = right) and `dy` pitch steps (positive = up), keeping its distance. |
-| `0x03`  | DISTANCE | `steps i8`          | Positive = farther, negative = closer. |
-| `0x04`  | SIZE     | `steps i8`          | Positive = bigger, negative = smaller. |
-| `0x05`  | RESET    | none                | Default distance and size, then recenter. |
+| Command | Name          | Args                   | Meaning |
+|---------|---------------|------------------------|---------|
+| `0x01`  | RECENTER      | none                   | Place the screen in front of the current head direction, keeping its distance and size. |
+| `0x02`  | (reserved)    | —                      | Formerly MOVE, removed. Never sent; receivers ignore it like any unknown command. |
+| `0x03`  | DISTANCE      | `steps i8`             | Positive = farther, negative = closer. |
+| `0x04`  | SIZE          | `steps i8`             | Positive = bigger, negative = smaller. |
+| `0x05`  | RESET         | none                   | Default distance and size, then recenter. |
+| `0x06`  | TRANSLATE     | `dx i8`, `dy i8`       | Slide the screen in its own plane: `dx` steps right, `dy` steps up. Its orientation does not change. |
+| `0x07`  | ORBIT         | `yaw i16`, `pitch i16` | Rotate the screen around the head position by `yaw`/100 degrees (positive = right) and `pitch`/100 degrees (positive = up), keeping its distance; the screen turns to keep facing the head. |
+| `0x08`  | DISTANCE_FINE | `v i16`                | Distance × 1.1^(v/100); positive = farther. `v = 100` equals one DISTANCE step. |
+| `0x09`  | SIZE_FINE     | `v i16`                | Width × 1.1^(v/100); positive = bigger. `v = 100` equals one SIZE step. |
 
-- `i8` is a signed byte (two's complement): `FF` = −1.
-- Step sizes are up to the client. The reference client (Quest app) uses 5° per MOVE
-  step, distance × 1.1^steps and width × 1.1^steps (aspect ratio kept), each clamped to
-  its own range.
+- `i8` is a signed byte, `i16` a signed big-endian 16-bit integer (two's complement):
+  `FF` = −1, `FF E7` = −25.
+- Step sizes of the step commands are up to the client. The reference client (Quest
+  app) uses 5 cm per TRANSLATE step, distance × 1.1^steps and width × 1.1^steps
+  (aspect ratio kept), each clamped to its own range. ORBIT, DISTANCE_FINE and
+  SIZE_FINE are exact (degrees, ×1.1^(v/100)), subject to the same clamps.
 - Clients MUST ignore unknown commands and any bytes after a known command's
   arguments (forward compatibility). A known command with missing argument bytes is
   malformed.
-- Each message is one discrete step; holding a shortcut on the Mac sends repeated
-  messages (after ~300 ms, then every ~80 ms).
+- Step commands come from keyboard shortcuts: one message per step; holding a
+  shortcut on the Mac repeats it (after ~300 ms, then every ~80 ms).
+- ORBIT, DISTANCE_FINE and SIZE_FINE come from continuous mouse/scroll gestures: the
+  sender coalesces input and sends at most one of each per 1/60 s, so a client can
+  apply them directly (or smooth them over a frame).
 
 ### `0x10` PING (client → server)
 
@@ -339,10 +348,11 @@ FRAME_ACK with `framesConsumed = 42`:
 12 00 00 00 04 00 00 00 2A
 ```
 
-CONTROL MOVE `dx = −1, dy = +1` and CONTROL RECENTER:
+CONTROL TRANSLATE `dx = −1, dy = +1`, ORBIT yaw +5.00° pitch −2.50°, and RECENTER:
 
 ```
-03 00 00 00 03 02 FF 01
+03 00 00 00 03 06 FF 01
+03 00 00 00 05 07 01 F4 FF 06
 03 00 00 00 01 01
 ```
 

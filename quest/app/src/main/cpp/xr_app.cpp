@@ -29,7 +29,7 @@ namespace {
         }                                                                    \
     } while (0)
 
-// Quad filtering via XR_FB_composition_layer_settings, cycled with B/Y or debug.questmirror.filter.
+// Quad filtering via XR_FB_composition_layer_settings, selected with debug.questmirror.filter.
 struct FilterMode {
     const char* name;
     XrCompositionLayerSettingsFlagsFB flags;
@@ -50,7 +50,10 @@ constexpr FilterMode kFilterModes[] = {
 };
 constexpr int32_t kFilterModeCount = static_cast<int32_t>(sizeof(kFilterModes) / sizeof(kFilterModes[0]));
 constexpr int32_t kAutoFilterMode = 6;
-constexpr int32_t kDefaultFilterMode = 2;  // sharpen-quality
+// No filtering: compared in the headset, it renders desktop text best. Quality sharpening (2)
+// draws a visible circle in the centre of the view (the runtime seems to apply it to a foveal
+// region only) and normal sharpening (1) degrades text. Mode 0 chains no settings struct at all.
+constexpr int32_t kDefaultFilterMode = 0;
 
 constexpr const char* kFilterProperty = "debug.questmirror.filter";
 constexpr const char* kRecenterProperty = "debug.questmirror.recenter";
@@ -675,16 +678,21 @@ void XrApp::onGrabReleased(const char* who) {
     // Re-anchor the placement on the head so the thumbstick, recenter and persistence keep working
     // relative to the new spot.
     if (headValid_) anchorPosition_ = headPose_.position;
-    const XrVector3f offset = quadPose_.position - anchorPosition_;
+    moveScreenTo(quadPose_.position, true);
+    LOGI("Grab released (%s): screen at (%.2f, %.2f, %.2f), %.2f m away, %.2f m above eye height", who,
+         quadPose_.position.x, quadPose_.position.y, quadPose_.position.z, placement_.distance,
+         placement_.heightOffset);
+    savePlacement();
+}
+
+void XrApp::moveScreenTo(const XrVector3f& position, bool faceAnchor) {
+    const XrVector3f offset = position - anchorPosition_;
     const float distance = length(offset);
     if (distance > 1e-3f) anchorDirection_ = offset * (1.0f / distance);
     placement_.distance = std::clamp(distance, kMinDistance, kMaxDistance);
     placement_.heightOffset = anchorDirection_.y * placement_.distance;
     updateQuadPose();
-    LOGI("Grab released (%s): screen at (%.2f, %.2f, %.2f), %.2f m away, %.2f m above eye height", who,
-         quadPose_.position.x, quadPose_.position.y, quadPose_.position.z, placement_.distance,
-         placement_.heightOffset);
-    savePlacement();
+    if (faceAnchor) quadPose_.orientation = facing(quadPose_.position, anchorPosition_);
 }
 
 void XrApp::startSimulatedGrab(const std::string& spec) {
@@ -740,6 +748,7 @@ void XrApp::pollDebugProperties() {
 }
 
 void XrApp::setPlacement(float distance, float width, const char* reason) {
+    // Distance moves the screen along the anchor -> screen line; its orientation is kept.
     placement_.distance = std::clamp(distance, kMinDistance, kMaxDistance);
     placement_.width = std::clamp(width, kMinWidth, kMaxWidth);
     placement_.heightOffset = anchorDirection_.y * placement_.distance;  // same direction, new distance
@@ -762,62 +771,90 @@ void XrApp::applyPlacementCommands() {
         std::lock_guard<std::mutex> lock(commandMutex_);
         commands.swap(commands_);
     }
+    using Kind = PlacementCommand::Kind;
+    constexpr float kDegrees = 3.14159265f / 180.0f;
+    constexpr float kMaxElevation = 80.0f * kDegrees;
     for (const PlacementCommand& c : commands) {
-        const char* name = c.kind == PlacementCommand::Kind::Recenter   ? "RECENTER"
-                           : c.kind == PlacementCommand::Kind::Move     ? "MOVE"
-                           : c.kind == PlacementCommand::Kind::Distance ? "DISTANCE"
-                           : c.kind == PlacementCommand::Kind::Size     ? "SIZE"
-                                                                        : "RESET";
+        const char* name = c.kind == Kind::Recenter       ? "RECENTER"
+                           : c.kind == Kind::Distance     ? "DISTANCE"
+                           : c.kind == Kind::Size         ? "SIZE"
+                           : c.kind == Kind::Reset        ? "RESET"
+                           : c.kind == Kind::Translate    ? "TRANSLATE"
+                           : c.kind == Kind::Orbit        ? "ORBIT"
+                           : c.kind == Kind::DistanceFine ? "DISTANCE_FINE"
+                                                          : "SIZE_FINE";
         if (std::any_of(std::begin(grabs_), std::end(grabs_), [](const Grab& g) { return g.active(); })) {
-            LOGW("Mac CONTROL %s ignored while the screen is grabbed", name);
+            if (!c.continuous()) LOGW("Mac CONTROL %s ignored while the screen is grabbed", name);
             continue;
         }
         if (!headValid_ || !quadPlaced_) {
-            LOGW("Mac CONTROL %s ignored: no head pose yet", name);
+            if (!c.continuous()) LOGW("Mac CONTROL %s ignored: no head pose yet", name);
             continue;
         }
+        if (!c.continuous() || (controlBurstCount_ > 0 && c.kind != controlBurstKind_)) flushControlBurstLog();
         const XrPosef before = quadPose_;
         switch (c.kind) {
-            case PlacementCommand::Kind::Recenter:
+            case Kind::Recenter:
                 placeInFront(headPose_);
                 break;
-            case PlacementCommand::Kind::Move: {
-                // Orbit the head: re-anchor on the current head position, then turn the direction.
-                anchorPosition_ = headPose_.position;
-                const XrVector3f offset = quadPose_.position - anchorPosition_;
-                const float distance = std::max(length(offset), 1e-3f);
-                const XrVector3f d = offset * (1.0f / distance);
-                constexpr float kStep = 5.0f * 3.14159265f / 180.0f;
-                constexpr float kMaxElevation = 80.0f * 3.14159265f / 180.0f;
-                const float azimuth = std::atan2(d.x, -d.z) + static_cast<float>(c.a) * kStep;  // + = right
-                const float elevation =
-                    std::clamp(std::asin(std::clamp(d.y, -1.0f, 1.0f)) + static_cast<float>(c.b) * kStep,
-                               -kMaxElevation, kMaxElevation);  // + = up
-                anchorDirection_ = {std::sin(azimuth) * std::cos(elevation), std::sin(elevation),
-                                    -std::cos(azimuth) * std::cos(elevation)};
-                placement_.distance = std::clamp(distance, kMinDistance, kMaxDistance);
-                placement_.heightOffset = anchorDirection_.y * placement_.distance;
-                updateQuadPose();
-                break;
-            }
-            case PlacementCommand::Kind::Distance:
+            case Kind::Distance:
                 setPlacement(placement_.distance * std::pow(1.1f, static_cast<float>(c.a)), placement_.width, nullptr);
                 break;
-            case PlacementCommand::Kind::Size:
+            case Kind::Size:
                 setPlacement(placement_.distance, placement_.width * std::pow(1.1f, static_cast<float>(c.a)), nullptr);
                 break;
-            case PlacementCommand::Kind::Reset:
+            case Kind::Reset:
                 placement_ = Placement{};
                 placeInFront(headPose_);
                 break;
+            case Kind::Translate:
+                // In the screen's own plane, orientation unchanged; the anchor stays where it was.
+                moveScreenTo(slideInPlane(quadPose_, 0.05f * c.a, 0.05f * c.b), false);
+                break;
+            case Kind::Orbit:
+                // Around the current head position, same distance, re-facing the head.
+                anchorPosition_ = headPose_.position;
+                moveScreenTo(orbit(quadPose_.position, anchorPosition_, 0.01f * c.a * kDegrees,
+                                   0.01f * c.b * kDegrees, kMaxElevation),
+                             true);
+                break;
+            case Kind::DistanceFine:
+                setPlacement(placement_.distance * std::pow(1.1f, 0.01f * c.a), placement_.width, nullptr);
+                break;
+            case Kind::SizeFine:
+                setPlacement(placement_.distance, placement_.width * std::pow(1.1f, 0.01f * c.a), nullptr);
+                break;
         }
-        savePlacement();
+        // Saved like the thumbstick: half a second after the last change, so a mouse or scroll-wheel
+        // stream of small deltas does not write the file 60 times a second.
+        placementDirty_ = true;
+        placementIdleSeconds_ = 0;
+        if (c.continuous()) {
+            // Streams are logged once per burst (before the next discrete command or the save).
+            if (controlBurstCount_++ == 0) {
+                controlBurstStart_ = before;
+                controlBurstKind_ = c.kind;
+                controlBurstName_ = name;
+            }
+            continue;
+        }
         LOGI("Mac CONTROL %s (%d, %d): screen (%.2f, %.2f, %.2f) -> (%.2f, %.2f, %.2f), %.2f m wide at %.2f m, "
              "%.2f m above eye height",
              name, c.a, c.b, before.position.x, before.position.y, before.position.z, quadPose_.position.x,
              quadPose_.position.y, quadPose_.position.z, placement_.width, placement_.distance,
              placement_.heightOffset);
     }
+}
+
+void XrApp::flushControlBurstLog() {
+    if (controlBurstCount_ == 0) return;
+    LOGI("Mac CONTROL %s stream of %u command(s): screen (%.2f, %.2f, %.2f) -> (%.2f, %.2f, %.2f), "
+         "%.2f m wide at %.2f m, %.2f m above eye height; head at (%.2f, %.2f, %.2f)",
+         controlBurstName_, controlBurstCount_, controlBurstStart_.position.x, controlBurstStart_.position.y,
+         controlBurstStart_.position.z, quadPose_.position.x, quadPose_.position.y, quadPose_.position.z,
+         placement_.width, placement_.distance, placement_.heightOffset, headPose_.position.x, headPose_.position.y,
+         headPose_.position.z);
+    controlBurstCount_ = 0;
 }
 
 void XrApp::loadPlacement() {
@@ -905,11 +942,12 @@ void XrApp::placeInFront(const XrPosef& head) {
     placement_.heightOffset = height;
     quadPlaced_ = true;
     updateQuadPose();
+    quadPose_.orientation = facing(quadPose_.position, anchorPosition_);
 }
 
 void XrApp::updateQuadPose() {
+    // Position only: operations that should re-face the head set the orientation themselves.
     quadPose_.position = anchorPosition_ + anchorDirection_ * placement_.distance;
-    quadPose_.orientation = facing(quadPose_.position, anchorPosition_);
 }
 
 void XrApp::renderFrame() {
@@ -950,9 +988,12 @@ void XrApp::renderFrame() {
     updateGrabs(frameState.predictedDisplayTime);
     applyPlacementCommands();
     if (placementDirty_) {
-        // Persist once the thumbstick has been released for half a second.
+        // Persist half a second after the last thumbstick or Mac CONTROL change.
         placementIdleSeconds_ += dt;
-        if (placementIdleSeconds_ > 0.5) savePlacement();
+        if (placementIdleSeconds_ > 0.5) {
+            flushControlBurstLog();
+            savePlacement();
+        }
     }
 
     const bool picture = source_.pictureReady();

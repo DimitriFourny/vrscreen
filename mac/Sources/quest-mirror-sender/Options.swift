@@ -18,6 +18,11 @@ struct SenderOptions {
     var width = 1920
     var height = 1080
     var hotkeys = true
+    var mouse = true
+    /// Degrees of ORBIT per point of mouse movement.
+    var mouseDegreesPerPoint = 0.1
+    /// Multiplier on the scroll → DISTANCE_FINE / SIZE_FINE scaling.
+    var scrollSensitivity = 1.0
     /// CONTROL commands sent to every client right after it connects (testing).
     var controlOnConnect: [ControlCommand] = []
 
@@ -40,9 +45,14 @@ struct SenderOptions {
                                not yet consumed by the client (default 3).
       --width N --height N     Test source size (default 1920x1080).
       --no-hotkeys             Do not register the global ⌃⌥⌘ screen-placement shortcuts.
+      --no-mouse               Do not use ⌃⌥⌘ + mouse (orbit) and ⌃⌥⌘ + scroll (zoom).
+      --mouse-sensitivity DEG  Orbit degrees per point of mouse movement (default 0.1).
+      --scroll-sensitivity X   Scroll zoom multiplier (default 1; a wheel notch is a
+                               quarter DISTANCE/SIZE step).
       --debug-control-on-connect SPEC
                                Testing: send these CONTROL commands to each client on
-                               connect, e.g. "move:1,0;distance:-2;size:1;recenter;reset".
+                               connect, e.g. "translate:1,0;orbit:500,-250;distance:-2;
+                               distance_fine:25;size:1;size_fine:-50;recenter;reset".
       -h, --help               Show this help.
     """
 
@@ -93,6 +103,9 @@ struct SenderOptions {
             case "--width": o.width = try int(arg, min: 16) & ~1
             case "--height": o.height = try int(arg, min: 16) & ~1
             case "--no-hotkeys": o.hotkeys = false
+            case "--no-mouse": o.mouse = false
+            case "--mouse-sensitivity": o.mouseDegreesPerPoint = try double(arg)
+            case "--scroll-sensitivity": o.scrollSensitivity = try double(arg)
             case "--debug-control-on-connect": o.controlOnConnect = try parseControlSpec(try value(arg))
             case "-h", "--help":
                 print(usage)
@@ -104,28 +117,43 @@ struct SenderOptions {
         return o
     }
 
-    /// Parses `cmd[:args];...` with cmd one of recenter, reset, move:DX,DY,
-    /// distance:STEPS, size:STEPS (values -128...127).
+    /// Parses `cmd[:args][*N];...` with cmd one of recenter, reset, translate:DX,DY,
+    /// distance:STEPS, size:STEPS (-128...127), orbit:YAW,PITCH (1/100 degree),
+    /// distance_fine:V, size_fine:V (-32768...32767); `*N` repeats the item N times.
     static func parseControlSpec(_ spec: String) throws -> [ControlCommand] {
-        try spec.split(separator: ";").map { item in
-            let parts = item.trimmingCharacters(in: .whitespaces).split(separator: ":", maxSplits: 1)
-            let name = parts.first.map { $0.lowercased() } ?? ""
-            let args = parts.count > 1 ? parts[1].split(separator: ",").map { $0.trimmingCharacters(in: .whitespaces) } : []
-            func steps(_ count: Int) throws -> [Int8] {
-                let values = args.compactMap { Int8($0) }
-                guard args.count == count, values.count == count else {
-                    throw OptionError("--debug-control-on-connect: '\(item)' needs \(count) integer argument(s) in -128...127")
+        try spec.split(separator: ";").flatMap { rawItem -> [ControlCommand] in
+            let item = rawItem.trimmingCharacters(in: .whitespaces)
+            let repeatParts = item.split(separator: "*", maxSplits: 1)
+            var repeatCount = 1
+            if repeatParts.count == 2 {
+                guard let n = Int(repeatParts[1].trimmingCharacters(in: .whitespaces)), (1...10_000).contains(n) else {
+                    throw OptionError("--debug-control-on-connect: '\(item)': repeat count must be 1...10000")
                 }
-                return values
+                repeatCount = n
             }
+            let parts = repeatParts.first.map { $0.split(separator: ":", maxSplits: 1) } ?? []
+            let name = parts.first.map { $0.trimmingCharacters(in: .whitespaces).lowercased() } ?? ""
+            let args = parts.count > 1 ? parts[1].split(separator: ",").map { $0.trimmingCharacters(in: .whitespaces) } : []
+            func values<T: FixedWidthInteger>(_ count: Int, _: T.Type) throws -> [T] {
+                let parsed = args.compactMap { T($0) }
+                guard args.count == count, parsed.count == count else {
+                    throw OptionError("--debug-control-on-connect: '\(item)' needs \(count) integer argument(s) in \(T.min)...\(T.max)")
+                }
+                return parsed
+            }
+            let command: ControlCommand
             switch name {
-            case "recenter": _ = try steps(0); return .recenter
-            case "reset": _ = try steps(0); return .reset
-            case "move": let v = try steps(2); return .move(dx: v[0], dy: v[1])
-            case "distance": return .distance(steps: try steps(1)[0])
-            case "size": return .size(steps: try steps(1)[0])
+            case "recenter": _ = try values(0, Int8.self); command = .recenter
+            case "reset": _ = try values(0, Int8.self); command = .reset
+            case "translate": let v = try values(2, Int8.self); command = .translate(dx: v[0], dy: v[1])
+            case "distance": command = .distance(steps: try values(1, Int8.self)[0])
+            case "size": command = .size(steps: try values(1, Int8.self)[0])
+            case "orbit": let v = try values(2, Int16.self); command = .orbit(yawCentidegrees: v[0], pitchCentidegrees: v[1])
+            case "distance_fine": command = .distanceFine(try values(1, Int16.self)[0])
+            case "size_fine": command = .sizeFine(try values(1, Int16.self)[0])
             default: throw OptionError("--debug-control-on-connect: unknown command '\(name)'")
             }
+            return Array(repeating: command, count: repeatCount)
         }
     }
 }

@@ -110,20 +110,35 @@ Measured on this Quest 3 (HEVC, Mac on 5 GHz Wi-Fi, same access point):
 | Right thumbstick right / left | Screen larger / smaller (0.5–5 m wide) |
 | Hold the Meta button (system recenter) | The app re-places the screen in front of you |
 
-From the Mac (sender hotkeys, sent as protocol `CONTROL` messages; see `../mac/README.md`):
-⌃⌥⌘ + arrows orbit the screen around your head in 5° steps, ⇧↑/⇧↓ distance ×1.1 / ÷1.1,
-⇧→/⇧← size ×1.1 / ÷1.1, R recenter, 0 reset to 1.8 m wide at 1.2 m in front of you.
+From the Mac (sender shortcuts, sent as protocol `CONTROL` messages; see `../mac/README.md`):
 
-Orientation: the screen always faces your head (yaw, and pitch when it sits above or below eye
-height) and never rolls, so it stays upright. While grabbed it turns towards your current head
-position; it ignores the thumbstick, A/X and Mac commands until released (one grabber at a time;
-the first grip wins).
+| Mac shortcut | Action |
+| --- | --- |
+| ⌃⌥⌘ + arrows | Slide the screen in its own plane, 5 cm per step; it keeps its orientation |
+| ⌃⌥⌘ + mouse | Orbit the screen around your head (keeps the distance, turns to face you, stays upright) |
+| ⌃⌥⌘ + scroll | Zoom: distance ×1.1 per 100 scroll units, farther/nearer |
+| ⌃⌥⌘⇧ + scroll | Size: width ×1.1 per 100 scroll units |
+| ⌃⌥⌘⇧ + ↑ / ↓ | Distance ×1.1 / ÷1.1 |
+| ⌃⌥⌘⇧ + → / ← | Size ×1.1 / ÷1.1 |
+| ⌃⌥⌘ + R | Recenter (same as A/X) |
+| ⌃⌥⌘ + 0 | Reset to 1.8 m wide at 1.2 m, at eye height, in front of you |
+
+Mouse and scroll arrive as a stream of small deltas (up to 60 per second); each is applied on the
+next frame.
+
+Orientation: grabbing, orbiting, recenter and reset turn the screen towards your head (yaw, and
+pitch when it sits above or below eye height); it never rolls, so it stays upright. Sliding and
+distance/size changes keep the orientation it has. While grabbed it turns towards your current
+head position; it ignores the thumbstick, A/X and Mac commands until released (one grabber at a
+time; the first grip wins).
 
 What is saved (`files/placement.txt`, as `distance width heightOffset`): distance from the eyes,
 width, and how far the centre sits above or below eye height. They are written when you release a
-grab, half a second after the thumbstick, and after every Mac command. The OpenXR LOCAL space
-changes every session, so an absolute pose is not stored: at launch (and on recenter) the screen
-goes in front of where you look, at the saved distance, width and height offset.
+grab, and half a second after the last thumbstick or Mac change (a mouse drag writes the file
+once, not 60 times a second). The OpenXR LOCAL space changes every session, so an absolute pose is
+not stored: at launch (and on recenter) the screen goes in front of where you look, at the saved
+distance, width and height offset. So a vertical slide or orbit survives a relaunch as the height
+offset, while a sideways slide or orbit does not (the screen comes back centred in front of you).
 Default: 1.8 m wide at 1.2 m, at eye height.
 
 Debug equivalents over adb (polled about twice a second; handy with the headset on the desk):
@@ -134,19 +149,22 @@ adb shell setprop debug.questmirror.distance 1.5       # metres (saved like the 
 adb shell setprop debug.questmirror.width 2.0          # metres (saved like the thumbstick)
 adb shell "setprop debug.questmirror.simgrab '0.3 0.2 0 45'"  # simulated grab: the grabber starts
                                                        # at the head, moves by (x, y, z) m, turns 45° left
-adb shell setprop debug.questmirror.filter 2           # compositor filter mode (default 2)
+adb shell setprop debug.questmirror.filter 1           # compositor filter mode (default 0 = none)
 adb shell setprop debug.questmirror.lowlatency 0       # A/B: decoder without low-latency keys
 adb shell setprop debug.questmirror.filter "''"        # clear any of these
 ```
 
 Filter modes (`XR_FB_composition_layer_settings`, plus `XR_META_automatic_layer_filter` for 6),
-only settable through the prop since quality sharpening looked best in the headset:
+only settable through the prop. No filtering is the default: compared in the headset it shows
+desktop text best. Quality sharpening (2) draws a visible circle in the centre of the view (the
+runtime seems to apply it to a foveal region only), and normal sharpening (1) degrades text
+compared with none. Mode 0 submits the quad without any layer-settings struct.
 
 | Mode | Flags |
 | --- | --- |
-| 0 | none |
-| 1 | normal sharpening |
-| 2 | quality sharpening (default) |
+| 0 | none (default) |
+| 1 | normal sharpening (text worse than none) |
+| 2 | quality sharpening (visible circle in the centre) |
 | 3 | normal super-sampling |
 | 4 | quality super-sampling |
 | 5 | quality super-sampling + quality sharpening |

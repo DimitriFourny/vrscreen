@@ -8,18 +8,24 @@
 
 namespace qm {
 
-// A screen placement change requested remotely (the Mac's keyboard shortcuts, protocol CONTROL).
+// A screen placement change requested remotely (the Mac's keyboard/mouse shortcuts, protocol
+// CONTROL). The continuous kinds arrive as a stream (mouse, scroll wheel) of small deltas.
 struct PlacementCommand {
     enum class Kind : uint8_t {
-        Recenter,  // in front of the current head direction, same distance/size
-        Move,      // orbit the head: a = yaw steps (+ = right), b = pitch steps (+ = up), 5 deg each
-        Distance,  // distance x 1.1^a
-        Size,      // width x 1.1^a
-        Reset,     // default distance and width, then recenter
+        Recenter,      // in front of the current head direction, same distance/size
+        Distance,      // distance x 1.1^a
+        Size,          // width x 1.1^a
+        Reset,         // default distance and width, then recenter
+        Translate,     // slide in the screen's plane: a x 5 cm right, b x 5 cm up; orientation kept
+        Orbit,         // continuous: around the head by a/100 deg yaw (+ = right), b/100 deg pitch (+ = up)
+        DistanceFine,  // continuous: distance x 1.1^(a/100)
+        SizeFine,      // continuous: width x 1.1^(a/100)
     };
     Kind kind = Kind::Recenter;
-    int8_t a = 0;
-    int8_t b = 0;
+    int16_t a = 0;
+    int16_t b = 0;
+
+    bool continuous() const { return kind == Kind::Orbit || kind == Kind::DistanceFine || kind == Kind::SizeFine; }
 };
 
 // Implemented by XrApp; lets a ScreenSource drive the quad's Surface and placement.

@@ -38,4 +38,25 @@ inline XrQuaternionf facing(const XrVector3f& position, const XrVector3f& viewer
     return {qy.w * sp, qy.y * cp, -qy.y * sp, qy.w * cp};
 }
 
+// Slides a quad in its own plane: `right` metres along its +X and `up` metres along its +Y.
+inline XrVector3f slideInPlane(const XrPosef& pose, float right, float up) {
+    return pose.position + rotate(pose.orientation, {right, 0.0f, 0.0f}) + rotate(pose.orientation, {0.0f, up, 0.0f});
+}
+
+// Rotates `position` around `pivot` by `yaw` (radians, + = to the viewer's right, i.e. towards +X
+// when looking down -Z) and `pitch` (radians, + = up), keeping its distance from the pivot.
+// The elevation is clamped to +-maxElevation so the point never passes over the pivot.
+inline XrVector3f orbit(const XrVector3f& position, const XrVector3f& pivot, float yaw, float pitch,
+                        float maxElevation) {
+    const XrVector3f offset = position - pivot;
+    const float distance = length(offset);
+    if (distance < 1e-4f) return position;
+    const XrVector3f d = offset * (1.0f / distance);
+    const float azimuth = std::atan2(d.x, -d.z) + yaw;
+    float elevation = std::asin(d.y < -1.0f ? -1.0f : d.y > 1.0f ? 1.0f : d.y) + pitch;
+    elevation = elevation < -maxElevation ? -maxElevation : elevation > maxElevation ? maxElevation : elevation;
+    return pivot + XrVector3f{std::sin(azimuth) * std::cos(elevation), std::sin(elevation),
+                              -std::cos(azimuth) * std::cos(elevation)} * distance;
+}
+
 }  // namespace qm

@@ -60,13 +60,17 @@ statsTimer.setEventHandler {
 }
 statsTimer.resume()
 
+// SIGHUP too (terminal closed): every shutdown goes through exit(), whose atexit
+// handler also restores the cursor if a mouse gesture had frozen it.
 signal(SIGINT, SIG_IGN)
 signal(SIGTERM, SIG_IGN)
+signal(SIGHUP, SIG_IGN)
 var signalSources: [DispatchSourceSignal] = []
-for sig in [SIGINT, SIGTERM] {
+for sig in [SIGINT, SIGTERM, SIGHUP] {
     let source = DispatchSource.makeSignalSource(signal: sig, queue: queue)
     source.setEventHandler {
         log("shutting down")
+        CursorFreeze.release()
         statsTimer.cancel()
         testSource?.stop()
         server.stop()
@@ -84,25 +88,45 @@ for sig in [SIGINT, SIGTERM] {
     signalSources.append(source)
 }
 
-// Global shortcuts need the main thread to run an AppKit/Carbon event loop; the
-// accessory policy keeps the sender out of the Dock and the app switcher. Signals
-// are still handled on `queue`, so Ctrl-C shuts down as before.
+// Global shortcuts and mouse gestures need the main thread to run an AppKit/Carbon
+// event loop; the accessory policy keeps the sender out of the Dock and the app
+// switcher. Signals are still handled on `queue`, so Ctrl-C shuts down as before.
 var hotkeys: HotkeyController?
-if options.hotkeys {
+var mouse: MouseControl?
+var lastMouseDropLog = Date.distantPast
+if options.hotkeys || options.mouse {
     let app = NSApplication.shared
     app.setActivationPolicy(.accessory)
-    let controller = HotkeyController { binding, isRepeat in
-        queue.async {
-            let action = "hotkey \(binding.label) → \(binding.command)\(isRepeat ? " (repeat)" : "")"
-            if let address = server.sendControl(binding.command) {
-                log("\(action) → \(address)")
-            } else {
-                log("\(action): no client connected, dropped")
+    if options.hotkeys {
+        let controller = HotkeyController { binding, isRepeat in
+            queue.async {
+                let action = "hotkey \(binding.label) → \(binding.command)\(isRepeat ? " (repeat)" : "")"
+                if let address = server.sendControl(binding.command) {
+                    log("\(action) → \(address)")
+                } else {
+                    log("\(action): no client connected, dropped")
+                }
             }
         }
+        controller.register()
+        hotkeys = controller
     }
-    controller.register()
-    hotkeys = controller
+    if options.mouse {
+        // MouseControl logs a per-second summary of what it sends; drops are logged at most once a second.
+        let control = MouseControl(degreesPerPoint: options.mouseDegreesPerPoint,
+                                   scrollSensitivity: options.scrollSensitivity) { commands in
+            queue.async {
+                for command in commands where server.sendControl(command) == nil {
+                    if Date().timeIntervalSince(lastMouseDropLog) >= 1 {
+                        lastMouseDropLog = Date()
+                        log("mouse: \(command): no client connected, dropped")
+                    }
+                }
+            }
+        }
+        control.start()
+        mouse = control
+    }
     app.run()
 } else {
     dispatchMain()
