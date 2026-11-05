@@ -21,13 +21,30 @@ constexpr int kChunk = 480;  // 10 ms
 constexpr int kBurst = 192;  // device callback size (4 ms)
 constexpr int64_t kDeviceLatency = 8'000;
 
-// Sample n: left = n % 30000 + 1, right = n / 30000 + 1 (0 is silence).
+// Sample n: two ramps of period 30000 half a period apart, left = n % 30000 + 1 and
+// right = (n + 15000) % 30000 + 1 (0 is silence). At most one of them is near its wrap (where
+// interpolation between its last and first value, while correcting drift, means nothing).
 int16_t leftOf(int64_t n) { return static_cast<int16_t>(n % 30000 + 1); }
-int16_t rightOf(int64_t n) { return static_cast<int16_t>(n / 30000 + 1); }
-// Index heard, or -1 for silence / a fade / the ramp's wrap (ambiguous under interpolation).
-double decode(int16_t left, int16_t right) {
-    if (left <= 0 || right <= 0 || left < 3 || left > 29997) return -1.0;
-    return static_cast<double>(right - 1) * 30000.0 + left - 1;
+int16_t rightOf(int64_t n) { return static_cast<int16_t>((n + 15000) % 30000 + 1); }
+// Index heard, given a rough guess (within +-7000 samples), or -1 for silence or a fade (the
+// ramps disagree).
+double decode(int16_t left, int16_t right, double guess) {
+    const bool leftOk = left >= 100 && left <= 29900;
+    const bool rightOk = right >= 100 && right <= 29900;
+    if (!leftOk && !rightOk) return -1.0;
+    const double fromLeft = left - 1;
+    const double fromRight = std::fmod(right - 1 + 15000.0, 30000.0);
+    if (leftOk && rightOk && std::fabs(fromLeft - fromRight) > 2.0) return -1.0;
+    const double low = leftOk ? fromLeft : fromRight;  // index modulo 30000
+    return low + 30000.0 * std::round((guess - low) / 30000.0);
+}
+
+// Most tests switch the startup floor off to check the steady-state logic from the first second;
+// the source-behaviour tests at the end use the real defaults.
+AudioPlayout::Config withoutStartupFloor() {
+    AudioPlayout::Config c;
+    c.startupDelayMicros = 0;
+    return c;
 }
 
 struct Sim {
@@ -39,6 +56,7 @@ struct Sim {
     std::function<int64_t(int64_t)> transit = [](int64_t) { return int64_t{5'000}; };  // after the chunk's end
     std::function<bool(int64_t)> sent = [](int64_t) { return true; };
     bool offsetKnown = true;
+    int64_t deviceLatency = kDeviceLatency;  // callback -> heard
 
     int64_t chunk = 0;      // next chunk to send
     int64_t callbacks = 0;  // device callbacks so far
@@ -53,7 +71,9 @@ struct Sim {
     std::vector<Heard> heard;
     int64_t silentFrames = 0;
 
-    Sim() { playout.reset(kRate, 2, kRate); }
+    explicit Sim(const AudioPlayout::Config& config = withoutStartupFloor()) : playout(config) {
+        playout.reset(kRate, 2, kRate);
+    }
     void setOutputRate(int rate) {
         outRate = rate;
         playout.reset(kRate, 2, rate);
@@ -92,10 +112,11 @@ struct Sim {
                 sendChunk();
                 continue;
             }
-            const int64_t present = nextCallback() + kDeviceLatency;
-            playout.render(buffer.data(), kBurst, present);
+            const int64_t present = nextCallback() + deviceLatency;
+            playout.render(buffer.data(), kBurst, present, nextCallback());
             ++callbacks;
-            heard.push_back({present, decode(buffer[0], buffer[1])});
+            const double guess = (present - 95'000 - localStart) * kRate * (1.0 + ppm * 1e-6) / 1e6;
+            heard.push_back({present, decode(buffer[0], buffer[1], guess)});
             for (int i = 0; i < kBurst; ++i) silentFrames += buffer[2 * i] == 0 ? 1 : 0;
         }
     }
@@ -205,12 +226,13 @@ TEST(audioStallCountsLateChunksAndRaisesTheTarget) {
     const AudioPlayoutStats s = sim.playout.takeStats();
     CHECK(s.underruns >= 1);
     CHECK(s.lateChunks >= 1);
-    // Worst arrival: 100 ms stall + 10 ms chunk + 5 ms transit, + 10 ms margin.
-    CHECK_NEAR(s.targetDelayMicros, 125'000, 1'000);
+    // Worst arrival: 100 ms stall + 10 ms chunk + 5 ms transit, + device lead (8 ms + one
+    // 194-frame callback) + 5 ms. One underrun only: no boost.
+    CHECK_NEAR(s.targetDelayMicros, 132'000, 1'000);
     // Re-synced at the new target (no 200 ms jump needed: it waited for the burst).
     const Sim::Delay d = sim.delay(2.5, 3.0);
-    CHECK_NEAR(d.min, 125.0, 6.0);
-    CHECK_NEAR(d.max, 125.0, 6.0);
+    CHECK_NEAR(d.min, 132.0, 6.0);
+    CHECK_NEAR(d.max, 132.0, 6.0);
 }
 
 TEST(audioTargetFallsBackAfterTheJitterWindow) {
@@ -218,7 +240,7 @@ TEST(audioTargetFallsBackAfterTheJitterWindow) {
     sim.transit = [](int64_t k) { return k == 50 ? int64_t{60'000} : int64_t{5'000}; };
     sim.run(1.0);
     CHECK(sim.playout.targetDelayMicros() > 70'000);
-    sim.run(5.0);  // the spike left the 4 s window
+    sim.run(9.0);  // the spike left the 8 s window
     CHECK_NEAR(sim.playout.targetDelayMicros(), 40'000, 0);
     sim.run(30.0);  // and the playout drifted back to it gently
     const Sim::Delay d = sim.delay(30.0, 36.0);
@@ -289,6 +311,98 @@ TEST(audioDuplicateChunkIsDropped) {
     const AudioPlayoutStats s = p.takeStats();
     CHECK(s.droppedChunks == 1);
     CHECK(s.gaps == 0);
+}
+
+// Reproduces the headset log under 4K encode load: audio arrives in batches every 30-60 ms, each
+// chunk 30-110 ms after its first sample was captured, and the device plays 20 ms after its
+// callback. The playout must settle at a delay that covers all of it (not underrun continuously).
+TEST(audioBurstyLateArrivalsSettleWithoutUnderruns) {
+    Sim sim(AudioPlayout::Config{});
+    sim.deviceLatency = 20'000;
+    // Deterministic pseudo-random batches.
+    uint32_t seed = 12345;
+    auto next = [&seed](int lo, int hi) {
+        seed = seed * 1664525u + 1013904223u;
+        return lo + static_cast<int>((seed >> 8) % static_cast<uint32_t>(hi - lo + 1));
+    };
+    const int64_t chunks = 2500;  // 25 s
+    std::vector<int64_t> batchTimes;
+    for (int64_t t = sim.localStart; t < sim.localStart + 30'000'000; t += next(30, 60) * 1000) batchTimes.push_back(t);
+    std::vector<int64_t> transits(static_cast<size_t>(chunks));
+    int64_t worst = 0;
+    for (int64_t k = 0; k < chunks; ++k) {
+        const int64_t captureEnd = sim.localStart + (k + 1) * 10'000;
+        const int64_t ready = captureEnd + next(20, 40) * 1000;
+        const int64_t arrival = *std::lower_bound(batchTimes.begin(), batchTimes.end(), ready);
+        transits[static_cast<size_t>(k)] = arrival - captureEnd;
+        worst = std::max(worst, arrival - captureEnd + 10'000);  // from the chunk's first sample
+    }
+    CHECK(worst > 90'000 && worst <= 110'000);
+    sim.transit = [&transits](int64_t k) { return transits[static_cast<size_t>(std::min<int64_t>(k, 2499))]; };
+    sim.run(5.0);
+    sim.playout.takeStats();
+    sim.run(15.0);
+    const AudioPlayoutStats s = sim.playout.takeStats();
+    CHECK_NEAR(s.underruns, 0, 0);
+    CHECK_NEAR(s.lateChunks, 0, 0);
+    const Sim::Delay d = sim.delay(5.0, 20.0);
+    CHECK(d.max <= 150.5);
+    // Covering the worst arrivals plus the 24 ms device lead, under the cap.
+    CHECK(s.targetDelayMicros >= worst + 20'000 && s.targetDelayMicros <= 150'000);
+    CHECK(d.min >= 100.0);
+}
+
+// "First seconds fine, then crackling": once settled (after the startup floor), the sender's
+// arrival delay keeps growing, +20 ms/s for 5 s, then holds at 105 ms. The playout must re-sync
+// to larger delays a few times rather than underrun every few callbacks.
+TEST(audioGrowingArrivalDelayResyncsInsteadOfCrackling) {
+    Sim sim(AudioPlayout::Config{});
+    sim.deviceLatency = 20'000;
+    sim.transit = [](int64_t k) {
+        const int64_t t = k * 10'000;  // capture time since start
+        const int64_t ramp = std::clamp<int64_t>(t - 10'000'000, 0, 5'000'000);
+        return int64_t{5'000} + ramp * 20 / 1000;
+    };
+    sim.run(10.0);
+    const AudioPlayoutStats settled = sim.playout.takeStats();
+    CHECK_NEAR(settled.underruns, 0, 0);
+    sim.run(7.0);
+    const AudioPlayoutStats ramp = sim.playout.takeStats();
+    CHECK_NEAR(ramp.underruns, 0, 5);
+    sim.run(13.0);
+    const AudioPlayoutStats hold = sim.playout.takeStats();
+    CHECK_NEAR(hold.underruns, 0, 0);
+    CHECK_NEAR(hold.lateChunks, 0, 0);
+    const Sim::Delay d = sim.delay(18.0, 30.0);
+    CHECK(d.min >= 115.0);   // 105 ms arrival + 10 ms chunk
+    CHECK(d.max <= 150.5);
+}
+
+// What MacAudio measured on the Mac under 4K load: ScreenCaptureKit hands over audio in 20 ms
+// buffers (split into two 10 ms chunks, which arrive together), about 10 ms after the buffer's
+// end during the first second, then 31-48 ms after it in a 4 s sawtooth (arrival - capture of a
+// chunk's first sample: up to ~70 ms). With a 20 ms device lead the playout must not underrun,
+// neither while the delay settles nor after.
+TEST(audioScreenCaptureKitArrivalPatternPlaysCleanly) {
+    Sim sim(AudioPlayout::Config{});
+    sim.deviceLatency = 20'000;
+    sim.transit = [](int64_t k) {
+        const int64_t batchEnd = (k / 2 + 1) * 20'000;  // since start
+        const int64_t lateAfterEnd =
+            batchEnd < 1'000'000 ? 10'000 : 31'000 + 17'000 * (batchEnd % 4'000'000) / 4'000'000;
+        const int64_t chunkEnd = (k + 1) * 10'000;
+        return batchEnd + lateAfterEnd - chunkEnd;  // both chunks of a batch arrive together
+    };
+    sim.run(30.0);
+    const AudioPlayoutStats s = sim.playout.takeStats();
+    CHECK_NEAR(s.underruns, 0, 0);
+    CHECK_NEAR(s.lateChunks, 0, 0);
+    CHECK_NEAR(s.resyncs, 0, 0);
+    // Worst arrival 68 ms + 24 ms lead + 5 ms: about 97 ms once the startup floor (90) is over.
+    CHECK_NEAR(sim.playout.targetDelayMicros(), 97'000, 2'000);
+    const Sim::Delay d = sim.delay(20.0, 30.0);
+    CHECK(d.samples > 2000);
+    CHECK(d.min > 90.0 && d.max < 104.0);
 }
 
 }  // namespace

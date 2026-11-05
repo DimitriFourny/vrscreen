@@ -8,7 +8,7 @@ namespace qm {
 namespace {
 
 constexpr int64_t kMask = AudioPlayout::kCapacityFrames - 1;
-constexpr int kBuckets = 16;
+constexpr int kBuckets = 32;
 
 void atomicMax(std::atomic<int64_t>& a, int64_t v) {
     int64_t cur = a.load(std::memory_order_relaxed);
@@ -32,7 +32,11 @@ void AudioPlayout::reset(int sampleRate, int channels, int outputRate) {
     anchorMicros_.store(0, std::memory_order_relaxed);
     haveAnchor_.store(false, std::memory_order_relaxed);
     playhead_.store(-1, std::memory_order_relaxed);
-    targetDelay_.store(std::max(config_.minDelayMicros, videoDelay_), std::memory_order_relaxed);
+    targetDelay_.store(std::max({config_.minDelayMicros, videoDelay_, config_.startupDelayMicros}),
+                       std::memory_order_relaxed);
+    effectiveTarget_.store(targetDelay_.load(std::memory_order_relaxed), std::memory_order_relaxed);
+    lead_.store(0, std::memory_order_relaxed);
+    firstArrival_ = 0;
     bucketStart_ = 0;
     bucket_ = 0;
     std::fill(std::begin(bucketMax_), std::end(bucketMax_), 0);
@@ -42,6 +46,9 @@ void AudioPlayout::reset(int sampleRate, int channels, int outputRate) {
     errorSmooth_ = 0.0;
     correcting_ = false;
     fadeIn_ = 0;
+    leadMax_ = 0.0;
+    boost_ = 0;
+    sinceUnderrun_ = 1e9;
     statBuffered_.store(-1, std::memory_order_relaxed);
     std::atomic_thread_fence(std::memory_order_release);
 }
@@ -103,6 +110,10 @@ void AudioPlayout::writeSilence(int64_t at, int64_t frames) {
 
 void AudioPlayout::updateTarget(int64_t captureMicros, int64_t arrivalMicros) {
     int64_t target = std::max(config_.minDelayMicros, videoDelay_);
+    if (firstArrival_ == 0) firstArrival_ = arrivalMicros;
+    // Until the window has seen a full cycle, assume the usual worst rather than the (often much
+    // better) first second: avoids starting low and underrunning as the arrival delay settles.
+    if (arrivalMicros - firstArrival_ < config_.startupMicros) target = std::max(target, config_.startupDelayMicros);
     if (offsetValid_.load(std::memory_order_acquire)) {
         // Arrival delay of this chunk's first sample: capture (local clock) -> received.
         const int64_t transit = arrivalMicros - (captureMicros - offset_.load(std::memory_order_relaxed));
@@ -116,7 +127,7 @@ void AudioPlayout::updateTarget(int64_t captureMicros, int64_t arrivalMicros) {
         }
         bucketMax_[bucket_] = std::max(bucketMax_[bucket_], transit);
         const int64_t worst = *std::max_element(std::begin(bucketMax_), std::end(bucketMax_));
-        target = std::max(target, worst + config_.marginMicros);
+        target = std::max(target, worst + lead_.load(std::memory_order_relaxed) + config_.safetyMicros);
     }
     targetDelay_.store(std::min(target, config_.maxDelayMicros), std::memory_order_relaxed);
 }
@@ -166,18 +177,31 @@ void AudioPlayout::push(int64_t captureMicros, const void* samples, int frames, 
     writeIndex_.store(w + frames, std::memory_order_release);
 }
 
-void AudioPlayout::render(int16_t* out, int frames, int64_t presentMicros) {
+void AudioPlayout::render(int16_t* out, int frames, int64_t presentMicros, int64_t nowMicros) {
     const int ch = channels_;
     std::fill_n(out, static_cast<size_t>(frames * ch), int16_t{0});
+    if (frames <= 0) return;
+    const double callbackSeconds = frames / static_cast<double>(outputRate_);
+    // Device lead: this callback needs, now, frames that are heard up to present + its length.
+    // A decaying maximum (1 ms/s) for the producer's target.
+    const double lead = static_cast<double>(presentMicros - nowMicros) + (frames + 2) * 1e6 / outputRate_;
+    leadMax_ = std::max(lead, leadMax_ - callbackSeconds * 1000.0);
+    lead_.store(static_cast<int64_t>(leadMax_), std::memory_order_relaxed);
+    sinceUnderrun_ += callbackSeconds;
+    if (boost_ > 0 && sinceUnderrun_ > config_.boostHoldSeconds) {
+        boost_ = std::max<int64_t>(0, boost_ - static_cast<int64_t>(config_.boostDecayPerSecond * callbackSeconds));
+    }
+    const int64_t target = std::min(targetDelay_.load(std::memory_order_relaxed) + boost_, config_.maxDelayMicros);
+    effectiveTarget_.store(target, std::memory_order_relaxed);
+
     Anchor anchor{};
-    if (frames <= 0 || !offsetValid_.load(std::memory_order_acquire) || !readAnchor(&anchor)) {
+    if (!offsetValid_.load(std::memory_order_acquire) || !readAnchor(&anchor)) {
         statBuffered_.store(-1, std::memory_order_relaxed);
         return;
     }
     const int64_t w = writeIndex_.load(std::memory_order_acquire);
     const int64_t oldest = std::max(oldestIndex_.load(std::memory_order_acquire), w - kCapacityFrames + 4096);
     const int64_t offset = offset_.load(std::memory_order_relaxed);
-    const int64_t target = targetDelay_.load(std::memory_order_relaxed);
     const double inRate = sampleRate_;
     const double baseStep = inRate / outputRate_;
     // Local time at which frame `i` is due at the speaker.
@@ -212,7 +236,6 @@ void AudioPlayout::render(int16_t* out, int frames, int64_t presentMicros) {
 
     // Positive error: the current frame will be heard later than due -> play faster.
     const double error = static_cast<double>(presentMicros) - dueMicros(static_cast<double>(readIndex_) + frac_);
-    const double callbackSeconds = frames / static_cast<double>(outputRate_);
     const double alpha = std::min(1.0, callbackSeconds / config_.errorSmoothingSeconds);
     errorSmooth_ += alpha * (error - errorSmooth_);
     bool jump = std::fabs(error) > static_cast<double>(config_.jumpMicros);
@@ -274,7 +297,16 @@ void AudioPlayout::render(int16_t* out, int frames, int64_t presentMicros) {
                                       std::memory_order_relaxed);
     }
     playhead_.store(readIndex_, std::memory_order_relaxed);
-    if (underrun) statUnderruns_.fetch_add(1, std::memory_order_relaxed);
+    if (underrun) {
+        statUnderruns_.fetch_add(1, std::memory_order_relaxed);
+        // Again within a few seconds: arrivals keep getting later than the target allows (a
+        // growing delay, bursts the window has not seen). Re-sync with more headroom instead of
+        // crackling on every burst.
+        if (sinceUnderrun_ < config_.repeatedUnderrunSeconds) {
+            boost_ = std::min(boost_ + config_.underrunBoostMicros, config_.maxDelayMicros);
+        }
+        sinceUnderrun_ = 0.0;
+    }
     if (jump) statResyncs_.fetch_add(1, std::memory_order_relaxed);
     if (underrun || jump) playing_ = false;
 }
@@ -282,7 +314,8 @@ void AudioPlayout::render(int16_t* out, int frames, int64_t presentMicros) {
 AudioPlayoutStats AudioPlayout::takeStats() {
     AudioPlayoutStats s;
     s.bufferedMicros = statBuffered_.load(std::memory_order_relaxed);
-    s.targetDelayMicros = targetDelay_.load(std::memory_order_relaxed);
+    s.targetDelayMicros = effectiveTarget_.load(std::memory_order_relaxed);
+    s.leadMicros = lead_.load(std::memory_order_relaxed);
     s.latencySumMicros = statLatencySum_.exchange(0, std::memory_order_relaxed);
     s.latencyMaxMicros = statLatencyMax_.exchange(0, std::memory_order_relaxed);
     s.latencySamples = statLatencySamples_.exchange(0, std::memory_order_relaxed);

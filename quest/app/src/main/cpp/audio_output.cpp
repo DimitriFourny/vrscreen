@@ -164,11 +164,12 @@ aaudio_data_callback_result_t AudioOutput::dataCallback(AAudioStream* /*stream*/
             fromTimestamp = true;
         }
     }
+    const int64_t nowNanos = monotonicNanos();
     if (!fromTimestamp) {
         // No timestamp yet (just started): about one device buffer from now.
-        presentNanos = monotonicNanos() + int64_t{self->bufferFrames_.load()} * 1'000'000'000 / self->deviceRate_;
+        presentNanos = nowNanos + int64_t{self->bufferFrames_.load()} * 1'000'000'000 / self->deviceRate_;
     }
-    self->playout_.render(static_cast<int16_t*>(audioData), numFrames, presentNanos / 1000);
+    self->playout_.render(static_cast<int16_t*>(audioData), numFrames, presentNanos / 1000, nowNanos / 1000);
     self->framesWritten_ += numFrames;
     return AAUDIO_CALLBACK_RESULT_CONTINUE;
 }

@@ -31,6 +31,8 @@ final class AudioReceiver {
         var gapMicros = 0.0
         var overlaps = 0
         var unsupported = 0
+        /// Arrival − captureTimeMicros per chunk (sender clock via PING/PONG offset), ms.
+        var latenciesMs: [Double] = []
     }
 
     init(wavPath: String?, detectOnsets: Bool) {
@@ -52,7 +54,8 @@ final class AudioReceiver {
         nextExpectedMicros = nil
     }
 
-    func handle(_ chunk: AudioMessage) {
+    /// `arrivalMicros`: when the chunk arrived, on the sender clock (nil before clock sync).
+    func handle(_ chunk: AudioMessage, arrivalMicros: Int64?) {
         guard let config, config.format == AudioConfigMessage.pcmS16LE, config.channels > 0, config.sampleRate > 0,
               chunk.pcm.count % config.bytesPerFrame == 0 else {
             stats.unsupported += 1
@@ -76,6 +79,9 @@ final class AudioReceiver {
         nextExpectedMicros = start + Double(frames) * 1e6 / rate
         stats.chunks += 1
         stats.pcmBytes += chunk.pcm.count
+        if let arrivalMicros {
+            stats.latenciesMs.append(Double(arrivalMicros - Int64(chunk.captureTimeMicros)) / 1000)
+        }
 
         if let wavPath {
             if wav == nil {
@@ -119,7 +125,8 @@ final class AudioReceiver {
         }
     }
 
-    /// "audio 100.0 chunks/s 1536 kbit/s, gaps 0" for the last `dt` seconds; nil before any audio.
+    /// "audio 100.0 chunks/s 1536 kbit/s, gaps 0, arrival−capture p50 … p95 … max … ms"
+    /// for the last `dt` seconds; nil before any audio.
     func takeStatsText(dt: Double) -> String? {
         defer { stats = Stats() }
         guard config != nil || stats.chunks > 0 else { return nil }
@@ -128,6 +135,12 @@ final class AudioReceiver {
         if stats.gaps > 0 { text += String(format: " (%.1f ms)", stats.gapMicros / 1000) }
         if stats.overlaps > 0 { text += ", overlaps \(stats.overlaps)" }
         if stats.unsupported > 0 { text += ", \(stats.unsupported) unsupported" }
+        if !stats.latenciesMs.isEmpty {
+            let sorted = stats.latenciesMs.sorted()
+            func percentile(_ p: Double) -> Double { sorted[min(sorted.count - 1, Int(Double(sorted.count) * p))] }
+            text += String(format: ", arrival−capture p50 %.1f p95 %.1f max %.1f ms",
+                           percentile(0.5), percentile(0.95), sorted.last!)
+        }
         wav?.updateHeader()
         return text
     }

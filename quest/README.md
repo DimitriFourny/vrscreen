@@ -124,9 +124,16 @@ volume buttons control it like any media.
 - **Timing** (`audio_playout.{h,cpp}`): every sample is played at its capture time (mapped to the
   headset clock with the PING clock offset) plus a target delay, so the sound stays in step with
   the picture. The target is the largest of 40 ms, the video's capture→display delay (its
-  capture→decoded average + 14 ms for the compositor) and the worst arrival delay of the last 4 s
-  + 10 ms, capped at 150 ms. It rises at once when the link gets jittery and comes back down 4 s
-  after.
+  capture→decoded average + 14 ms for the compositor) and the worst arrival delay of the last 8 s
+  + the device lead + 5 ms, capped at 150 ms. The *device lead* is measured in every callback: a
+  callback runs well before its frames are heard (time until heard + the callback's own length),
+  and the data must already be there then. During the first 8 s of a stream the target is at
+  least 90 ms: macOS ScreenCaptureKit delivers audio early during the first second, then 31–48 ms
+  after each 20 ms buffer ends in a 4 s sawtooth (up to ~70 ms after capture under 4K load), so
+  a target computed from the first second would be too low. The target rises at once when the link
+  gets worse and comes back down 8 s after. Underruns within 3 s of each other (the arrival delay
+  keeps growing) add 20 ms each, which fades away at 2 ms/s after 5 s without one: it re-syncs
+  with more headroom a few times instead of crackling.
 - **Clock**: the AAudio callback knows when its frames will be heard (`AAudioStream_getTimestamp`,
   refreshed every 50 ms from the network thread). If what plays is more than 5 ms off its due
   time, the playout speeds up or slows down by a tiny resampling ratio (error × 0.25/s, at most 2 %)
@@ -140,13 +147,15 @@ volume buttons control it like any media.
 Once per second, while audio is on:
 
 ```
-Audio: buffer <ms> (target <ms>), capture->speaker avg <ms> max <ms>, underruns <n>,
+Audio: buffer <ms> (target <ms>, device lead <ms>), capture->speaker avg <ms> max <ms>, underruns <n>,
        resyncs <n>, late <n>, dropped <n>, gaps <n> (<ms>), corrections <n> (<+/-ms>),
        AAudio <rate> Hz <n> ch, device buffer <ms>, device xruns <n>
 ```
 
-- *buffer*: received and not yet played. *capture->speaker*: from the Mac's capture of a sample to
-  the moment the speaker plays it (AAudio timestamps + clock offset), per callback.
+- *buffer*: received and not yet played. *target*: the delay aimed at (with any underrun boost).
+  *device lead*: how long before being heard a callback needs its frames. *capture->speaker*: from
+  the Mac's capture of a sample to the moment the speaker plays it (AAudio timestamps + clock
+  offset), per callback.
 - *underruns* / *resyncs*: ran dry / jumped. *late*: chunks that came after their time.
   *dropped*: duplicates. *gaps*: holes filled with silence. *corrections*: drift corrections
   started and how much source time they skipped (+) or stretched (−). *device xruns*: AAudio's own

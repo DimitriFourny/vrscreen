@@ -286,10 +286,11 @@ bool MediaCodecSource::onStatsTick(const LinkStats& stats) {
                           static_cast<double>(a.latencySumMicros) / static_cast<double>(a.latencySamples) / 1000.0,
                           static_cast<double>(a.latencyMaxMicros) / 1000.0);
         }
-        LOGI("Audio: buffer %.1f ms (target %.1f ms), capture->speaker %s, underruns %" PRIu64 ", resyncs %" PRIu64
-             ", late %" PRIu64 ", dropped %" PRIu64 ", gaps %" PRIu64 " (%.1f ms), corrections %" PRIu64
+        LOGI("Audio: buffer %.1f ms (target %.1f ms, device lead %.1f ms), capture->speaker %s, underruns %" PRIu64
+             ", resyncs %" PRIu64 ", late %" PRIu64 ", dropped %" PRIu64 ", gaps %" PRIu64 " (%.1f ms), corrections %" PRIu64
              " (%+.2f ms), %s",
-             static_cast<double>(a.bufferedMicros) / 1000.0, static_cast<double>(a.targetDelayMicros) / 1000.0, speaker,
+             static_cast<double>(a.bufferedMicros) / 1000.0, static_cast<double>(a.targetDelayMicros) / 1000.0,
+             static_cast<double>(a.leadMicros) / 1000.0, speaker,
              a.underruns, a.resyncs, a.lateChunks, a.droppedChunks, a.gaps, static_cast<double>(a.gapMicros) / 1000.0,
              a.corrections, static_cast<double>(a.correctedMicros) / 1000.0, audioOutput_.describe().c_str());
     }

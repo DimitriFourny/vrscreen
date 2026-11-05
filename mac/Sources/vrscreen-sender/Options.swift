@@ -22,6 +22,8 @@ struct SenderOptions {
     var menu = true
     /// False with --no-audio: never capture or send audio, whatever the menu setting.
     var audio = true
+    /// --settings: settings file instead of the standard one.
+    var settingsPath: String?
     /// Headset on USB for the menu's travel-mode items (scripts/mirror.sh passes it).
     var adbSerial: String?
     /// Degrees of ORBIT per point of mouse movement.
@@ -56,6 +58,9 @@ struct SenderOptions {
       --no-menu                No menu-bar icon (curvature, dimming, audio, re-center, quit).
       --no-audio               Never capture or send audio (overrides the menu's
                                "Audio in headset").
+      --settings PATH          Settings file to read and write (default
+                               ~/Library/Application Support/VRScreen/settings.json),
+                               e.g. for a second sender used for testing.
       --adb-serial S           Headset on USB (adb serial) for the menu's travel-mode
                                items; without it they show "headset not on USB".
       --mouse-sensitivity DEG  Orbit degrees per point of mouse movement (default 0.1).
@@ -118,6 +123,7 @@ struct SenderOptions {
             case "--no-mouse": o.mouse = false
             case "--no-menu": o.menu = false
             case "--no-audio": o.audio = false
+            case "--settings": o.settingsPath = try value(arg)
             case "--adb-serial": o.adbSerial = try value(arg)
             case "--mouse-sensitivity": o.mouseDegreesPerPoint = try double(arg)
             case "--scroll-sensitivity": o.scrollSensitivity = try double(arg)

@@ -74,15 +74,18 @@ Stop either with Ctrl-C.
 | `--no-mouse`               | off     | Do not use ⌃⌥⌘ + mouse (orbit) / scroll (zoom)               |
 | `--no-menu`                | off     | No menu-bar icon                                             |
 | `--no-audio`               | off     | Never capture or send audio, whatever the menu says          |
+| `--settings PATH`          | standard | Settings file to read/write instead of `~/Library/Application Support/VRScreen/settings.json` (e.g. a second sender for testing) |
 | `--adb-serial S`           | none    | Headset on USB for the menu's travel-mode items (`scripts/mirror.sh` passes it) |
 | `--mouse-sensitivity DEG`  | 0.1     | Orbit degrees per point of mouse movement                    |
 | `--scroll-sensitivity X`   | 1       | Scroll zoom multiplier (a wheel notch is a quarter step)     |
 | `--debug-control-on-connect SPEC` | none | Testing: CONTROL commands sent to each client on connect, paced at 60 Hz; `wait:MS` pauses; e.g. `"translate:1,0;orbit:50,0*50;curvature:500;wait:3000;dim:1000"` |
 
 Once per second it logs capture fps, encoded fps (and keyframes), captures skipped by
-backpressure, the bitrate actually sent, audio chunks queued per second and dropped as
-too late (or `audio off`), and the client with its unsent backlog and, for clients that
-send FRAME_ACK, frames in flight (current/limit and the per-second max).
+backpressure, the bitrate actually sent, audio chunks queued per second, dropped as too
+late, and how late ScreenCaptureKit delivered its audio buffers (`SCK delivery p50/max`,
+after each buffer's last sample; or `audio off`), and the client with its unsent backlog
+and, for clients that send FRAME_ACK, frames in flight (current/limit and the per-second
+max).
 
 ### Viewer options
 
@@ -102,8 +105,9 @@ send FRAME_ACK, frames in flight (current/limit and the per-second max).
 Once per second it logs received and decoded fps, bitrate, capture→decoded latency
 (avg/max, measured through the PING/PONG clock offset the way the Quest client does
 it), the last PING round trip, the stream format and, once audio arrives, audio chunks
-per second, PCM kbit/s and gaps (a chunk starting more than 1 ms after the previous one
-ended; total gap time in brackets). It acknowledges every FRAME
+per second, PCM kbit/s, gaps (a chunk starting more than 1 ms after the previous one
+ended; total gap time in brackets) and arrival − capture time per chunk (p50/p95/max,
+same clock offset). It acknowledges every FRAME
 (FRAME_ACK) as it hands it to the decoder, and reconnects every second while the
 sender is unreachable or after the sender restarts. CONTROL messages are printed
 (`control: TRANSLATE dx=+1 dy=0`, `control: ORBIT yaw=+0.50° pitch=+0.00°`).
@@ -331,9 +335,13 @@ about 550 Mbit/s through the USB tunnel.
 - **Encoding thread**: the low-latency encoder encodes synchronously inside
   `VTCompressionSessionEncodeFrame` (~15 ms at 4K on an M-series Mac), so it runs on its
   own queue, one frame at a time, and does not delay networking or PONGs.
-- **Audio path**: ScreenCaptureKit delivers Float32 planar buffers of 960 frames (20 ms)
-  about 25 ms after capture, also during silence; a re-chunker converts them to s16le
-  and cuts 10 ms chunks whose timestamps follow the capture clock (a buffer more than
-  5 ms off the expected time is a discontinuity: the partial chunk is dropped and timing
-  restarts). Queued AUDIO older than 150 ms is removed from the client's send queue
-  before it reaches the socket; audio already in the kernel buffer cannot be recalled.
+- **Audio path**: ScreenCaptureKit delivers Float32 planar buffers of 960 frames (20 ms),
+  also during silence, 30–50 ms after the buffer's last sample (about 10 ms during the
+  first second, then it settles; measured the same with and without 4K video in the
+  stream, and with no video output at all). The sender adds under 1 ms: on loopback a
+  chunk's first sample is p50 ≈ 49 ms, p95 ≈ 65 ms old on arrival. A re-chunker converts
+  the buffers to s16le and cuts 10 ms chunks whose timestamps follow the capture clock
+  (a buffer more than 5 ms off the expected time is a discontinuity: the partial chunk
+  is dropped and timing restarts). Queued AUDIO older than 150 ms is removed from the
+  client's send queue before it reaches the socket; audio already in the kernel buffer
+  cannot be recalled. AUDIO overtakes FRAMEs still waiting unstarted in the send queue.

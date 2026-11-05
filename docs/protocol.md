@@ -275,9 +275,16 @@ One chunk of audio.
 - **Clock:** `captureTimeMicros` is on the same sender clock as FRAME `captureTimeMicros`
   (see "Clocks"), so audio and video are synchronized by comparing the two: a sample and
   a picture with the same capture time were captured at the same moment. For screen
-  capture it is ScreenCaptureKit's presentation time of the audio buffer (captured
-  system audio is about 25 ms old when the sender gets it); for the test pattern, the
-  synthesized time.
+  capture it is ScreenCaptureKit's presentation time of the audio buffer; for the test
+  pattern, the synthesized time.
+- **Audio arrives later than video.** ScreenCaptureKit hands over system audio in 20 ms
+  buffers 30–50 ms after a buffer's last sample (only ~10 ms during the first second or
+  two of a capture, then it settles higher), so a chunk's first sample is typically
+  40–70 ms old when it leaves the sender, versus ~20 ms capture-to-decoded for 4K video.
+  Measured on the Mac loopback over 60 s: arrival − `captureTimeMicros` p50 ≈ 49 ms,
+  p95 ≈ 65 ms, max ≈ 70 ms, stable. Size jitter buffers for that plus the transport,
+  over a window of several seconds (not from the first second), and delay video if A/V
+  sync matters more than video latency.
 - **Continuity:** consecutive chunks normally follow each other exactly (next
   `captureTimeMicros` = previous + frames × 10^6 / sampleRate, within ±1 µs of
   rounding; the sender follows the capture clock, so small adjustments of up to a few
@@ -286,8 +293,10 @@ One chunk of audio.
   (switched off on the Mac) without any message. Clients play silence in gaps (or let
   their buffer drain to silence) and re-align on the timestamps; they must not stall.
 - **Not part of flow control:** AUDIO does not count as a FRAME, is never acknowledged
-  and does not take room in the frame windows. It shares the socket with FRAMEs, in
-  capture order.
+  and does not take room in the frame windows. It shares the socket with FRAMEs: the
+  sender puts each AUDIO ahead of FRAMEs that are queued but not yet started on the
+  socket, never ahead of other message types or earlier AUDIO, so AUDIO_CONFIG always
+  precedes the AUDIO it describes.
 - **Drop policy:** audio is only useful when it is fresh. The sender drops queued AUDIO
   chunks, oldest first, that are more than **150 ms** past their capture time before they
   could be handed to the socket (e.g. while a slow link drains a large keyframe). Bytes

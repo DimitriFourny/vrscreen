@@ -89,7 +89,7 @@ client.onMessage = { message in
     case .audioConfig(let config):
         audio.handleConfig(config)
     case .audio(let chunk):
-        audio.handle(chunk)
+        audio.handle(chunk, arrivalMicros: client.clock.serverNowMicros())
     default:
         break
     }

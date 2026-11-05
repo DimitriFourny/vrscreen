@@ -27,7 +27,9 @@ final class ClientSession {
     fileprivate let fd: Int32
     fileprivate var reader = MessageReader(expectHello: false)
     /// `audioMicros` is set for AUDIO messages: their capture time, for the stale-audio drop.
-    fileprivate var pending: [(data: Data, written: Int, completion: (() -> Void)?, audioMicros: UInt64?)] = []
+    /// `isFrame` marks FRAME messages, which AUDIO may overtake while they are unstarted.
+    fileprivate var pending: [(data: Data, written: Int, completion: (() -> Void)?, audioMicros: UInt64?,
+                               isFrame: Bool)] = []
     fileprivate var readSource: DispatchSourceRead?
     fileprivate var writeSource: DispatchSourceWrite?
     fileprivate var writeSourceRunning = false
@@ -138,14 +140,19 @@ final class MirrorServer {
     @discardableResult
     func send(_ message: Message, to client: ClientSession, completion: (() -> Void)? = nil) -> Bool {
         guard client.isActive else { return false }
-        if case .frame = message { client.ackWindow.recordSent() }
-        enqueue(message.encoded(), to: client, completion: completion)
+        var isFrame = false
+        if case .frame = message {
+            client.ackWindow.recordSent()
+            isFrame = true
+        }
+        enqueue(message.encoded(), to: client, completion: completion, isFrame: isFrame)
         return true
     }
 
     /// Sends one AUDIO chunk to the active client (AUDIO_CONFIG first if this connection has
-    /// not had it). Audio is not part of the frame windows; queued chunks that are older than
-    /// `maxAudioAgeMicros` before they can be written are dropped, oldest first.
+    /// not had it). Audio is not part of the frame windows: a chunk goes ahead of FRAMEs that
+    /// are queued but not yet started on the socket (never ahead of other messages or of
+    /// earlier audio), and queued chunks older than `maxAudioAgeMicros` are dropped.
     func sendAudio(_ chunk: AudioMessage) {
         guard let config = audioConfig, let client = activeClient, client.isActive else { return }
         if client.sentAudioConfig != config {
@@ -299,9 +306,19 @@ final class MirrorServer {
 
     // MARK: Writing
 
-    private func enqueue(_ data: Data, to client: ClientSession, completion: (() -> Void)?, audioMicros: UInt64? = nil) {
+    private func enqueue(_ data: Data, to client: ClientSession, completion: (() -> Void)?,
+                         audioMicros: UInt64? = nil, isFrame: Bool = false) {
         bytesSent += data.count
-        client.pending.append((data, 0, completion, audioMicros))
+        var index = client.pending.endIndex
+        if audioMicros != nil {
+            // Overtake trailing FRAMEs that have not started; a partly written message,
+            // CONFIG, CONTROL, AUDIO_CONFIG and earlier AUDIO keep their place before it.
+            while index > client.pending.startIndex, client.pending[index - 1].isFrame,
+                  client.pending[index - 1].written == 0 {
+                index -= 1
+            }
+        }
+        client.pending.insert((data, 0, completion, audioMicros, isFrame), at: index)
         flush(client)
     }
 

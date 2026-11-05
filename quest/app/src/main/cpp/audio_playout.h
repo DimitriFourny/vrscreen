@@ -9,7 +9,8 @@ namespace qm {
 // Counters since the previous takeStats() (latency figures cover callbacks that played audio).
 struct AudioPlayoutStats {
     int64_t bufferedMicros = -1;      // received but not yet played, at the last callback; -1 = idle
-    int64_t targetDelayMicros = 0;    // capture -> speaker delay aimed at
+    int64_t targetDelayMicros = 0;    // capture -> speaker delay aimed at (including any boost)
+    int64_t leadMicros = 0;           // device lead: frames must be here this long before heard
     int64_t latencySumMicros = 0;     // capture -> speaker, per callback
     int64_t latencyMaxMicros = 0;
     int64_t latencySamples = 0;
@@ -34,10 +35,16 @@ struct AudioPlayoutStats {
 //
 // Playout: frame i is meant to be heard at localCapture(i) + targetDelay. The target is the larger
 // of minDelay (40 ms), the video's capture->display delay (setVideoDelay) and the worst arrival
-// delay of the last 4 s plus a margin; at most maxDelay (150 ms). render() gets the time its
-// first frame will be heard (from AAudioStream_getTimestamp) and:
+// delay of the last 8 s plus the device lead (how far ahead of being heard a callback must have
+// its frames: measured in render()) plus 5 ms; during the first 8 s of a stream, before the
+// window has seen a full cycle of the source's behaviour (macOS ScreenCaptureKit delivers audio
+// early at first, then 31-48 ms late in a 4 s sawtooth), at least startupDelay (90 ms).
+// Repeated underruns (within 3 s of each other: the arrival delay keeps growing) add 20 ms each
+// on top, which fades 2 ms/s after 5 s without one. At most maxDelay (150 ms). render() gets the
+// time its first frame will be heard (from
+// AAudioStream_getTimestamp) and the current time, and:
 // - waiting (start, after an underrun or a jump): silence until the frame due now has arrived,
-//   then starts exactly there with a short fade-in;
+//   then starts exactly there (at the current, possibly larger, target) with a short fade-in;
 // - playing: compares when the current frame will be heard with when it is due. Beyond 5 ms
 //   (smoothed) it resamples by a tiny ratio (0.25 x the error per second, at most 2 %) until the
 //   error is under 1 ms: inaudible drift correction, no clicks. Beyond 200 ms it fades out and
@@ -51,7 +58,11 @@ public:
     struct Config {
         int64_t minDelayMicros = 40'000;
         int64_t maxDelayMicros = 150'000;
-        int64_t marginMicros = 10'000;      // over the worst arrival delay: device callback lead
+        int64_t safetyMicros = 5'000;       // over the worst arrival delay + the device lead
+        int64_t underrunBoostMicros = 20'000;  // per repeated underrun
+        double repeatedUnderrunSeconds = 3.0;
+        double boostHoldSeconds = 5.0;      // without underruns before the boost fades
+        int64_t boostDecayPerSecond = 2'000;
         int64_t jumpMicros = 200'000;
         int64_t correctStartMicros = 5'000;
         int64_t correctStopMicros = 1'000;
@@ -60,7 +71,9 @@ public:
         double errorSmoothingSeconds = 0.3;
         int64_t gapToleranceMicros = 5'000;  // timestamp jitter still counted as contiguous
         int fadeFrames = 96;                 // 2 ms at 48 kHz
-        int64_t jitterBucketMicros = 250'000;  // arrival-delay window: 16 buckets = 4 s
+        int64_t jitterBucketMicros = 250'000;  // arrival-delay window: 32 buckets = 8 s
+        int64_t startupDelayMicros = 90'000;   // floor while the window fills (0: none)
+        int64_t startupMicros = 8'000'000;
     };
 
     AudioPlayout() : AudioPlayout(Config{}) {}
@@ -80,14 +93,15 @@ public:
 
     // ---- Consumer (audio callback; wait-free) ----
     // Fills `frames` interleaved frames (channels() each) whose first will be heard at
-    // `presentMicros` (local clock).
-    void render(int16_t* out, int frames, int64_t presentMicros);
+    // `presentMicros`; the callback runs at `nowMicros` (both local clock).
+    void render(int16_t* out, int frames, int64_t presentMicros, int64_t nowMicros);
 
     // Any thread. Returns and clears the counters.
     AudioPlayoutStats takeStats();
     int sampleRate() const { return sampleRate_; }
     int channels() const { return channels_; }
-    int64_t targetDelayMicros() const { return targetDelay_.load(std::memory_order_relaxed); }
+    // Capture -> speaker delay aimed at now (including any underrun boost).
+    int64_t targetDelayMicros() const { return effectiveTarget_.load(std::memory_order_relaxed); }
 
 private:
     struct Anchor {
@@ -115,14 +129,17 @@ private:
     std::atomic<bool> haveAnchor_{false};
     std::atomic<bool> offsetValid_{false};
     std::atomic<int64_t> offset_{0};
-    std::atomic<int64_t> targetDelay_{0};
+    std::atomic<int64_t> targetDelay_{0};      // from arrivals (producer)
+    std::atomic<int64_t> effectiveTarget_{0};  // + underrun boost (consumer)
+    std::atomic<int64_t> lead_{0};             // device lead measured by the consumer
     std::atomic<int64_t> playhead_{-1};    // next index the consumer plays (late detection)
 
     // Producer only.
     int64_t videoDelay_ = 0;
+    int64_t firstArrival_ = 0;
     int64_t bucketStart_ = 0;
     int bucket_ = 0;
-    int64_t bucketMax_[16] = {};
+    int64_t bucketMax_[32] = {};
 
     // Consumer only.
     bool playing_ = false;
@@ -131,6 +148,9 @@ private:
     double errorSmooth_ = 0.0;  // microseconds
     bool correcting_ = false;
     int fadeIn_ = 0;
+    double leadMax_ = 0.0;            // decaying max of the measured lead, microseconds
+    int64_t boost_ = 0;               // added to the target after repeated underruns
+    double sinceUnderrun_ = 1e9;      // seconds of callbacks since the last underrun
 
     // Stats.
     std::atomic<int64_t> statBuffered_{-1};

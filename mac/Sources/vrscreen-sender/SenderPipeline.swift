@@ -132,8 +132,9 @@ final class SenderPipeline {
         pump()
     }
 
-    /// Logs once-per-second stats. Call from a 1 s timer on `queue`.
-    func logStats() {
+    /// Logs once-per-second stats. Call from a 1 s timer on `queue`; `audioCapture` is the
+    /// audio source's own summary (ScreenCaptureKit delivery delay), if any.
+    func logStats(audioCapture: String? = nil) {
         let now = Date()
         let dt = now.timeIntervalSince(lastStatsTime)
         lastStatsTime = now
@@ -154,8 +155,9 @@ final class SenderPipeline {
         let audioDropped = server.audioChunksDropped - lastAudioDropped
         lastAudioSent = server.audioChunksQueued
         lastAudioDropped = server.audioChunksDropped
-        let audioText = server.audioConfig == nil ? "audio off"
+        var audioText = server.audioConfig == nil ? "audio off"
             : String(format: "audio %.0f chunks/s, %d dropped", Double(audioSent) / dt, audioDropped)
+        if let audioCapture, server.audioConfig != nil { audioText += ", " + audioCapture }
         log(String(format: "capture %.1f fps | encoded %.1f fps (%d key) | skipped %d (total %d) | %.2f Mbit/s | %@ | %@",
                    Double(stats.captured) / dt, Double(stats.encoded) / dt, stats.keyframes,
                    stats.skipped, totalSkipped, Double(bytes) * 8 / dt / 1e6, audioText, clientText))

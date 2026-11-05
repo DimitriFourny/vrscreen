@@ -21,7 +21,8 @@ let pipeline = SenderPipeline(queue: queue, encoder: encoder, server: server)
 let discovery = options.discoveryPort.map { DiscoveryResponder(port: $0, tcpPort: options.port, queue: queue) }
 server.controlOnConnect = options.controlOnConnect
 // Curvature/dim persist across restarts and are sent to every client, with or without the menu.
-let settingsStore = DisplaySettingsStore.standard
+let settingsStore = options.settingsPath.map { DisplaySettingsStore(url: URL(fileURLWithPath: $0)) }
+    ?? DisplaySettingsStore.standard
 let initialDisplaySettings = settingsStore.load()
 server.updateDisplaySettings(initialDisplaySettings)
 let deliver: (CVPixelBuffer, UInt64) -> Void = { buffer, micros in pipeline.handleCapture(buffer, captureMicros: micros) }
@@ -94,7 +95,8 @@ queue.async {
 let statsTimer = DispatchSource.makeTimerSource(queue: queue)
 statsTimer.schedule(deadline: .now() + 1, repeating: 1)
 statsTimer.setEventHandler {
-    pipeline.logStats()
+    // The audio queue only converts and never waits on `queue`, so this sync is short.
+    pipeline.logStats(audioCapture: audioPipeline.flatMap { audio in audio.queue.sync { audio.takeCaptureStats() } })
     screenSource?.checkDisplayMode()
 }
 statsTimer.resume()

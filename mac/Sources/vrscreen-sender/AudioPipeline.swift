@@ -18,6 +18,17 @@ final class AudioPipeline {
                                        framesPerChunk: framesPerChunk)
     private var loggedFormat = false
     private var unsupportedFormatLogged = false
+    /// How late ScreenCaptureKit delivered each buffer since the last `takeCaptureStats`:
+    /// now − capture time of the buffer's last sample, ms. On `queue`.
+    private var deliveryAgesMs: [Double] = []
+
+    /// "SCK delivery p50 35 max 48 ms" since the last call; nil without buffers. On `queue`.
+    func takeCaptureStats() -> String? {
+        defer { deliveryAgesMs.removeAll(keepingCapacity: true) }
+        guard !deliveryAgesMs.isEmpty else { return nil }
+        let ages = deliveryAgesMs.sorted()
+        return String(format: "SCK delivery p50 %.0f max %.0f ms", ages[ages.count / 2], ages.last!)
+    }
 
     init(server: MirrorServer, serverQueue: DispatchQueue) {
         self.server = server
@@ -60,6 +71,8 @@ final class AudioPipeline {
         }
         let frames = sampleBuffer.numSamples
         let micros = HostClock.micros(sampleBuffer.presentationTimeStamp)
+        let endMicros = Double(micros) + Double(frames) * 1e6 / Double(chunker.sampleRate)
+        deliveryAgesMs.append((Double(HostClock.nowMicros()) - endMicros) / 1000)
         try? sampleBuffer.withAudioBufferList { list, _ in
             // Mono is duplicated to every channel; planar has one buffer per channel.
             let buffers = Array(list)
