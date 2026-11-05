@@ -31,8 +31,11 @@ let audioPipeline = options.audio ? AudioPipeline(server: server, serverQueue: q
 let macMute = MacOutputMute(queue: queue)
 /// Latest settings (from the file, then the menu). On `queue`.
 var currentSettings = initialDisplaySettings
-/// Menu status-line updates; set once the menu exists. On `queue`.
+/// Menu status-line and battery updates; set once the menu exists. On `queue`.
 var onClientChangedForMenu: ((String?) -> Void)?
+var onHeadsetStatusForMenu: ((HeadsetStatus) -> Void)?
+/// Last HEADSET_STATUS of the current connection (changes are logged once). On `queue`.
+var lastHeadsetStatus: HeadsetStatus?
 
 var testSource: TestPatternSource?
 var screenSource: ScreenSource?
@@ -89,8 +92,17 @@ func makeProcessTap(_ audio: AudioPipeline) -> SystemAudioTap? {
 }
 
 server.onActiveClientChanged = { address in
+    lastHeadsetStatus = nil
     applyAudioSettings()
     onClientChangedForMenu?(address)
+}
+server.onHeadsetStatus = { status in
+    guard status != lastHeadsetStatus else { return }
+    if lastHeadsetStatus.map(StatusMenu.batteryLogText) != StatusMenu.batteryLogText(status) {
+        log(StatusMenu.batteryLogText(status))
+    }
+    lastHeadsetStatus = status
+    onHeadsetStatusForMenu?(status)
 }
 
 queue.async {
@@ -221,8 +233,13 @@ if options.hotkeys || options.mouse || options.menu {
         queue.async {
             // Server state lives on `queue`; also show a client that connected before this ran.
             onClientChangedForMenu = { address in DispatchQueue.main.async { menu.setClient(address: address) } }
+            onHeadsetStatusForMenu = { status in DispatchQueue.main.async { menu.setBattery(status) } }
             let current = server.activeClient?.address
-            DispatchQueue.main.async { menu.setClient(address: current) }
+            let status = lastHeadsetStatus
+            DispatchQueue.main.async {
+                menu.setClient(address: current)
+                if let status { menu.setBattery(status) }
+            }
         }
         statusMenu = menu
     }

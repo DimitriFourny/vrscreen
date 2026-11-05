@@ -102,6 +102,7 @@ with its unsent backlog and, for clients that send FRAME_ACK, frames in flight
 | `--duration S`          | none      | Exit after S seconds                     |
 | `--audio-wav PATH.wav`  | none      | Write the received audio to a WAV file   |
 | `--av-sync`             | off       | With `--source test`: pair each white flash with its beep and log audio − video |
+| `--fake-battery SPEC`   | none      | Testing: send HEADSET_STATUS like a headset, e.g. `72`, `72,charging`, `100,plugged`, `unknown` (on connect, then every 60 s) |
 
 Once per second it logs received and decoded fps, bitrate, capture→decoded latency
 (avg/max, measured through the PING/PONG clock offset the way the Quest client does
@@ -128,6 +129,12 @@ follows light/dark mode; "QM" if the symbol is missing). Its menu has:
 
 - a status line: `Headset: USB (127.0.0.1)` (the adb tunnel), `Headset: Wi-Fi <ip>`
   or `No headset connected`, updated live, also while the menu is open;
+- under it, while a headset is connected, its battery as the headset reports it
+  (HEADSET_STATUS): `Battery: 72 %`, `Battery: 72 % — charging`, `Battery: 100 % —
+  plugged in`, or `Battery: —` until it reports one (or if it doesn't know). Hidden
+  while no headset is connected; a new connection starts from `—`, so an old value is
+  never shown. Changes are logged once (`headset battery 72 % charging`); a malformed
+  report is logged and ignored;
 - **Curved screen** 0–100 %: 0 = flat, 100 % = the screen wraps around you on a
   cylinder whose radius is the viewing distance;
 - **Dim surroundings** 0–100 %: darkens the passthrough around the screen, up to

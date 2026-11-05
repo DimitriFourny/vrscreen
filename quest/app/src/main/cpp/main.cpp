@@ -2,6 +2,7 @@
 // Mirrors the Mac's screen: TCP stream from vrscreen-sender, decoded with MediaCodec straight
 // into a world-locked Android-surface quad over passthrough.
 
+#include "battery_monitor.h"
 #include "log.h"
 #include "mediacodec_source.h"
 #include "xr_app.h"
@@ -65,6 +66,8 @@ void android_main(android_app* app) {
 
     {
         qm::MediaCodecSource source(app->activity->internalDataPath != nullptr ? app->activity->internalDataPath : "");
+        // Battery for the Mac: read every 10 s, sent with the next HEADSET_STATUS that is due.
+        qm::BatteryMonitor battery(app->activity, [&source](const qm::HeadsetStatus& s) { source.setHeadsetStatus(s); });
         qm::XrApp xr(app->activity, env, source);
         bool finishing = false;
         if (!xr.initialize()) {

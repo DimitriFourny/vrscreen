@@ -173,6 +173,14 @@ Audio: buffer <ms> (target <ms>, device lead <ms>), capture->speaker avg <ms> ma
   started and how much source time they skipped (+) or stretched (−). *device xruns*: AAudio's own
   underruns (the callback was late), which should stay at 0.
 
+## Headset battery
+
+The app reports the headset's battery to the Mac (protocol `HEADSET_STATUS`: percent, charging,
+plugged in) right after connecting, on every change and at least once a minute. It reads it every
+10 s on its own thread from Android's sticky battery intent (`Context.registerReceiver(null,
+ACTION_BATTERY_CHANGED)` through JNI, `battery_monitor.{h,cpp}`; encoding and send rules in
+`headset_status.h`, host-tested) and logs changes as `Battery: 87 %, charging, plugged in`.
+
 ## Controls
 
 | Input | Action |
@@ -363,6 +371,8 @@ compared with none. Mode 0 submits the quad without any layer-settings struct.
   device).
 - `audio_output.{h,cpp}` — `AudioOutput`: the AAudio stream, its timestamps, device-change
   reopening.
+- `battery_monitor.{h,cpp}`, `headset_status.h` — battery reading (JNI, own thread) and the
+  HEADSET_STATUS payload / send rules.
 - `stream_client.{h,cpp}` — protocol v1 client on its own thread: the USB/Wi-Fi policy above
   (UDP discovery, last host), numeric-IP connects in 50 ms slices so `stop()` is immediate, hello
   check, CONFIG validation (1..8192, even), message parsing (unknown types skipped), PING every

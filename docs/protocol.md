@@ -105,7 +105,7 @@ Every message is:
   continuing with the next message. This is how later protocol revisions add messages
   without breaking v1 clients. Both sides follow this rule.
 - Receivers MUST ignore flag bits they do not know, and any payload bytes beyond the
-  fields defined below for AUDIO_CONFIG, PING, PONG and FRAME_ACK.
+  fields defined below for AUDIO_CONFIG, PING, PONG, FRAME_ACK and HEADSET_STATUS.
 - Receivers may treat `length > 64 MiB` (67 108 864) as a protocol error and close the
   connection. Real messages are far smaller (a 4K keyframe is typically 150-500 KB).
 
@@ -119,6 +119,7 @@ Every message is:
 | `0x10` | PING   | client → server |
 | `0x11` | PONG   | server → client |
 | `0x12` | FRAME_ACK | client → server |
+| `0x13` | HEADSET_STATUS | client → server |
 
 ### `0x01` CONFIG
 
@@ -349,6 +350,22 @@ after a CONFIG). It starts at 0 for every connection and wraps around at 2^32.
 - FRAME_ACK is optional. A client that never sends it keeps working; the server then
   only bounds its socket backlog (see "Flow control").
 
+### `0x13` HEADSET_STATUS (client → server)
+
+The headset's battery state, shown in the Mac sender's menu.
+
+| Payload offset | Size | Field          | Notes                                                          |
+|---------------:|-----:|----------------|----------------------------------------------------------------|
+| 0              | 1    | batteryPercent | `u8`, 0–100; `255` = unknown (the server treats any value above 100 as unknown) |
+| 1              | 1    | flags          | `u8`; bit 0 = charging, bit 1 = plugged in (powered, possibly not charging, e.g. when full); other bits reserved |
+
+- Sent right after connecting, whenever a value changes, and at least every 60 s.
+- Optional: a client that never sends it just shows no battery on the Mac.
+- The server keeps the state per connection only: a new or lost connection forgets it.
+- Bytes after the two fields are ignored. A payload shorter than 2 bytes is malformed:
+  the server logs and ignores that message and keeps the connection (unlike other
+  malformed messages).
+
 ## Clocks and latency measurement
 
 `captureTimeMicros` and `serverTimeMicros` are on the **sender clock**: the macOS host
@@ -447,6 +464,12 @@ FRAME_ACK with `framesConsumed = 42`:
 12 00 00 00 04 00 00 00 2A
 ```
 
+HEADSET_STATUS 72 %, charging:
+
+```
+13 00 00 00 02 48 01
+```
+
 CONTROL TRANSLATE `dx = −1, dy = +1`, ORBIT yaw +5.00° pitch −2.50°, and RECENTER:
 
 ```
@@ -488,6 +511,7 @@ server → client  CONTROL SET_CURVATURE 350, SET_DIM 0, SET_HAND_GESTURES 0 (cu
 server → client  AUDIO_CONFIG format=1 48000 Hz 2 ch (if audio is on)
 server → client  FRAME  key=1 (VPS SPS PPS + IDR slices)
 client → server  FRAME_ACK 1
+client → server  HEADSET_STATUS 72 % (then on change, at least every 60 s)
 client → server  PING
 server → client  AUDIO  t=… (10 ms of PCM; ~100 per second, interleaved with FRAMEs)
 server → client  PONG

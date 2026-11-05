@@ -98,3 +98,16 @@ import Testing
     #expect(StatusMenu.statusText(forClientAddress: "127.0.0.1:50123") == "Headset: USB (127.0.0.1)")
     #expect(StatusMenu.statusText(forClientAddress: "192.168.1.42:41000") == "Headset: Wi-Fi 192.168.1.42")
 }
+
+@Test func menuBatteryLine() {
+    #expect(StatusMenu.batteryText(nil) == "Battery: —")
+    #expect(StatusMenu.batteryText(HeadsetStatus(batteryPercent: 72, charging: false, pluggedIn: false)) == "Battery: 72 %")
+    #expect(StatusMenu.batteryText(HeadsetStatus(batteryPercent: 72, charging: true, pluggedIn: true)) == "Battery: 72 % — charging")
+    #expect(StatusMenu.batteryText(HeadsetStatus(batteryPercent: 100, charging: false, pluggedIn: true))
+        == "Battery: 100 % — plugged in")
+    #expect(StatusMenu.batteryText(HeadsetStatus(batteryPercent: 255, flags: 0x01)) == "Battery: —")
+    #expect(StatusMenu.batteryLogText(HeadsetStatus(batteryPercent: 72, charging: true, pluggedIn: false))
+        == "headset battery 72 % charging")
+    #expect(StatusMenu.batteryLogText(HeadsetStatus(batteryPercent: nil, charging: false, pluggedIn: false))
+        == "headset battery unknown")
+}

@@ -37,6 +37,7 @@ constexpr uint8_t kMsgAudio = 0x05;
 constexpr uint8_t kMsgPing = 0x10;
 constexpr uint8_t kMsgPong = 0x11;
 constexpr uint8_t kMsgFrameAck = 0x12;
+constexpr uint8_t kMsgHeadsetStatus = 0x13;
 constexpr uint32_t kMaxPayload = 64u << 20;
 constexpr size_t kHeaderSize = 5;
 constexpr int kDefaultPort = 7777;
@@ -447,6 +448,7 @@ std::string StreamClient::session(int fd) {
     clockSamples_.clear();
     offsetValid_ = false;
     bestRtt_ = -1;
+    statusReporter_.reset();  // the battery goes out right after the hello
 
     std::vector<uint8_t> rx(1 << 20);
     size_t head = 0;  // first unparsed byte
@@ -464,6 +466,7 @@ std::string StreamClient::session(int fd) {
             ++pingsSent;
             nextPing = now + (pingsSent < kFastPings ? kFastPingIntervalMicros : kPingIntervalMicros);
         }
+        if (!sendHeadsetStatusIfDue(fd, now)) return errnoString("send HEADSET_STATUS");
         if (now - lastTick >= kStatsIntervalMicros) {
             LinkStats stats;
             stats.seconds = static_cast<double>(now - lastTick) / 1e6;
@@ -666,6 +669,17 @@ bool StreamClient::sendAck(int fd) {
     if (!sendAll(fd, msg, sizeof(msg))) return false;
     framesAcked_ = framesConsumed_;
     return true;
+}
+
+bool StreamClient::sendHeadsetStatusIfDue(int fd, int64_t nowMicros) {
+    HeadsetStatus status;
+    if (!HeadsetStatus::unpack(headsetStatus_.load(), &status)) return true;  // no reading yet
+    if (!statusReporter_.shouldSend(status, nowMicros)) return true;
+    uint8_t msg[kHeaderSize + 2];
+    msg[0] = kMsgHeadsetStatus;
+    writeU32(msg + 1, 2);
+    encodeHeadsetStatus(status, msg + kHeaderSize);
+    return sendAll(fd, msg, sizeof(msg));
 }
 
 void StreamClient::onPong(const uint8_t* payload, uint32_t length) {

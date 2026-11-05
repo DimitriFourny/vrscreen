@@ -45,6 +45,9 @@ final class ViewerClient {
     /// CONFIG / FRAME / CONTROL / AUDIO_CONFIG / AUDIO messages, in stream order.
     var onMessage: ((Message) -> Void)?
     var onDisconnected: (() -> Void)?
+    /// --fake-battery: sent right after connecting and then every `headsetStatusInterval`.
+    var headsetStatus: HeadsetStatus?
+    static let headsetStatusInterval: TimeInterval = 60
 
     private(set) var clock = ClockSync()
     private(set) var bytesReceived = 0
@@ -53,6 +56,7 @@ final class ViewerClient {
     private var generation = 0
     private var reader = MessageReader(expectHello: true)
     private var pingTimer: DispatchSourceTimer?
+    private var statusTimer: DispatchSourceTimer?
     private var connected = false
     /// FRAMEs consumed on the current connection (FRAME_ACK counter, wraps).
     private var framesConsumed: UInt32 = 0
@@ -102,6 +106,7 @@ final class ViewerClient {
                 log("client: connected to \(self.host):\(self.port)")
                 self.receive(conn, gen)
                 self.startPings(conn)
+                self.startHeadsetStatus(conn)
             case .waiting(let error), .failed(let error):
                 self.fail("\(error)")
             default:
@@ -118,6 +123,8 @@ final class ViewerClient {
         conn.cancel()
         pingTimer?.cancel()
         pingTimer = nil
+        statusTimer?.cancel()
+        statusTimer = nil
         if connected {
             connected = false
             onDisconnected?()
@@ -160,7 +167,7 @@ final class ViewerClient {
                           clientReceiveMicros: HostClock.nowMicros())
         case .config, .frame, .control, .audioConfig, .audio:
             onMessage?(message)
-        case .ping, .frameAck:
+        case .ping, .frameAck, .headsetStatus:
             break // Client-to-server types.
         case .unknown:
             break // Forward compatibility: skip unknown types.
@@ -190,5 +197,17 @@ final class ViewerClient {
         }
         timer.resume()
         pingTimer = timer
+    }
+
+    /// HEADSET_STATUS right away, then periodically (the protocol wants one at least every 60 s).
+    private func startHeadsetStatus(_ conn: NWConnection) {
+        guard let status = headsetStatus else { return }
+        let timer = DispatchSource.makeTimerSource(queue: queue)
+        timer.schedule(deadline: .now(), repeating: Self.headsetStatusInterval)
+        timer.setEventHandler {
+            conn.send(content: Message.headsetStatus(status).encoded(), completion: .contentProcessed { _ in })
+        }
+        timer.resume()
+        statusTimer = timer
     }
 }

@@ -1,8 +1,10 @@
 // Host unit tests: hand-gesture state machine, pose filter, facing()/headingOf() near the zenith,
-// highlight geometry, protocol hello/discovery framing (the audio playout is in audio_tests.cpp).
+// highlight geometry, protocol hello/discovery framing, HEADSET_STATUS (the audio playout is in
+// audio_tests.cpp).
 
 #include "grab.h"
 #include "hand_gestures.h"
+#include "headset_status.h"
 #include "test_support.h"
 #include "wire.h"
 #include "xr_math.h"
@@ -609,6 +611,41 @@ TEST(audioConfigParsing) {
     f.channels = 2;
     f.format = 2;
     CHECK(!wire::playable(f));
+}
+
+// ---- HEADSET_STATUS -------------------------------------------------------------------------
+
+TEST(headsetStatusFromBatteryExtras) {
+    HeadsetStatus s = headsetStatusFromBattery(87, 100, 2, 2);  // charging over USB
+    CHECK(s.batteryPercent == 87);
+    CHECK(s.flags == (HeadsetStatus::kCharging | HeadsetStatus::kPluggedIn));
+    s = headsetStatusFromBattery(100, 100, 5, 1);  // full, still on AC: plugged, not charging
+    CHECK(s.batteryPercent == 100 && s.flags == HeadsetStatus::kPluggedIn);
+    s = headsetStatusFromBattery(41, 255, 3, 0);  // other scale, discharging
+    CHECK(s.batteryPercent == 16 && s.flags == 0);
+    s = headsetStatusFromBattery(-1, -1, -1, 0);  // extras missing
+    CHECK(s.batteryPercent == HeadsetStatus::kUnknownPercent && s.flags == 0);
+    uint8_t payload[2];
+    encodeHeadsetStatus(headsetStatusFromBattery(55, 100, 2, 2), payload);
+    CHECK(payload[0] == 55 && payload[1] == 0x03);
+    HeadsetStatus unpacked;
+    CHECK(!HeadsetStatus::unpack(0, &unpacked));  // no reading yet
+    CHECK(HeadsetStatus::unpack(s.pack(), &unpacked) && unpacked == s);
+}
+
+TEST(headsetStatusSentOnConnectChangeAndEveryMinute) {
+    HeadsetStatusReporter r;
+    const HeadsetStatus a = headsetStatusFromBattery(80, 100, 3, 0);
+    const HeadsetStatus charging = headsetStatusFromBattery(80, 100, 2, 2);
+    const HeadsetStatus lower = headsetStatusFromBattery(79, 100, 3, 0);
+    CHECK(r.shouldSend(a, 0));            // first one on the connection
+    CHECK(!r.shouldSend(a, 10'000'000));  // unchanged
+    CHECK(r.shouldSend(charging, 11'000'000));  // flags changed
+    CHECK(r.shouldSend(lower, 12'000'000));     // percent changed
+    CHECK(!r.shouldSend(lower, 71'000'000));
+    CHECK(r.shouldSend(lower, 72'000'000));     // 60 s heartbeat
+    r.reset();                                  // new connection
+    CHECK(r.shouldSend(lower, 72'100'000));
 }
 
 }  // namespace

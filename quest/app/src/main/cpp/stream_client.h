@@ -10,6 +10,7 @@
 #include <thread>
 #include <vector>
 
+#include "headset_status.h"
 #include "screen_source.h"
 #include "wire.h"
 
@@ -106,6 +107,9 @@ public:
     static int64_t nowMicros();
     // Sender clock minus client clock, from the lowest-RTT PING of the last 16. False until known.
     bool clockOffset(int64_t* offsetMicros) const;
+    // Thread-safe. The latest battery reading; sent to the sender as HEADSET_STATUS after the
+    // hello, on every change and at least every 60 s.
+    void setHeadsetStatus(const HeadsetStatus& status) { headsetStatus_ = status.pack(); }
 
 private:
     struct Endpoint {
@@ -125,6 +129,8 @@ private:
     bool handleMessage(uint8_t type, const uint8_t* payload, uint32_t length, std::string* error);
     bool sendPing(int fd);
     bool sendAck(int fd);
+    // HEADSET_STATUS when due (HeadsetStatusReporter); false if the send failed.
+    bool sendHeadsetStatusIfDue(int fd, int64_t nowMicros);
     void onPong(const uint8_t* payload, uint32_t length);
     bool sleepInterruptible(int milliseconds);
 
@@ -161,6 +167,9 @@ private:
     std::atomic<bool> offsetValid_{false};
     std::atomic<int64_t> offset_{0};
     std::atomic<int64_t> bestRtt_{-1};
+    HeadsetStatusReporter statusReporter_;
+
+    std::atomic<uint32_t> headsetStatus_{0};  // HeadsetStatus::pack(); 0 = no reading yet
 };
 
 }  // namespace qm

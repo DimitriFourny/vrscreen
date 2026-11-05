@@ -41,6 +41,7 @@ public enum MessageType: UInt8, Sendable {
     case ping = 0x10
     case pong = 0x11
     case frameAck = 0x12
+    case headsetStatus = 0x13
 }
 
 /// `0x01 CONFIG`: `codec u8 | width u32 | height u32 | parameter sets (Annex-B)`.
@@ -92,6 +93,8 @@ public enum Message: Equatable, Sendable {
     /// Client → server: cumulative number of FRAMEs on this connection the client
     /// has consumed (handed to its decoder or discarded). Wraps at 2^32.
     case frameAck(framesConsumed: UInt32)
+    /// Client → server: the headset's battery and charging state.
+    case headsetStatus(HeadsetStatus)
     /// A message type this implementation does not know; receivers skip it.
     case unknown(type: UInt8, payload: Data)
 
@@ -123,6 +126,10 @@ public enum Message: Equatable, Sendable {
         case .frameAck(let n):
             type = MessageType.frameAck.rawValue
             payload.appendBigEndian(n)
+        case .headsetStatus(let s):
+            type = MessageType.headsetStatus.rawValue
+            payload.append(s.batteryPercent)
+            payload.append(s.flags)
         case .control(let command):
             type = MessageType.control.rawValue
             payload = command.encoded()
@@ -193,6 +200,11 @@ public enum Message: Equatable, Sendable {
                 throw .malformed(type: type, reason: "FRAME_ACK payload shorter than 4 bytes")
             }
             return .frameAck(framesConsumed: n)
+        case .headsetStatus:
+            guard let battery = r.u8(), let flags = r.u8() else {
+                throw .malformed(type: type, reason: "HEADSET_STATUS payload shorter than 2 bytes")
+            }
+            return .headsetStatus(HeadsetStatus(batteryPercent: battery, flags: flags))
         }
     }
 }

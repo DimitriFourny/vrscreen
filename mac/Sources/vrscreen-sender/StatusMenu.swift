@@ -27,6 +27,8 @@ final class StatusMenu: NSObject, NSMenuDelegate {
 
     private var statusItem: NSStatusItem?
     private let statusLine = NSMenuItem(title: StatusMenu.statusText(forClientAddress: nil), action: nil, keyEquivalent: "")
+    /// "Battery: 72 % — charging" under the status line; hidden while no headset is connected.
+    private let batteryLine = NSMenuItem(title: StatusMenu.batteryText(nil), action: nil, keyEquivalent: "")
     private var curvatureRow: SliderRow?
     private var dimRow: SliderRow?
     private var handGesturesItem: NSMenuItem?
@@ -73,6 +75,9 @@ final class StatusMenu: NSObject, NSMenuDelegate {
         menu.autoenablesItems = false
         statusLine.isEnabled = false
         menu.addItem(statusLine)
+        batteryLine.isEnabled = false
+        batteryLine.isHidden = true
+        menu.addItem(batteryLine)
         menu.addItem(.separator())
         let curvature = SliderRow(title: "Curved screen", percent: Double(settings.curvature) / 10,
                                   target: self, action: #selector(sliderMoved(_:)))
@@ -132,9 +137,18 @@ final class StatusMenu: NSObject, NSMenuDelegate {
         refreshTravelMode()
     }
 
-    /// Updates the status line (also while the menu is open).
+    /// Updates the status line (also while the menu is open). A new or no connection
+    /// forgets the battery state: "Battery: —" until the headset reports it, hidden while
+    /// no headset is connected.
     func setClient(address: String?) {
         statusLine.title = Self.statusText(forClientAddress: address)
+        batteryLine.title = Self.batteryText(nil)
+        batteryLine.isHidden = address == nil
+    }
+
+    /// Shows the battery state reported by the connected headset.
+    func setBattery(_ status: HeadsetStatus) {
+        batteryLine.title = Self.batteryText(status)
     }
 
     /// "Headset: USB (127.0.0.1)" for the adb tunnel, "Headset: Wi-Fi <ip>" otherwise.
@@ -142,6 +156,22 @@ final class StatusMenu: NSObject, NSMenuDelegate {
         guard let address else { return "No headset connected" }
         let host = address.lastIndex(of: ":").map { String(address[..<$0]) } ?? address
         return host == "127.0.0.1" ? "Headset: USB (127.0.0.1)" : "Headset: Wi-Fi \(host)"
+    }
+
+    /// "Battery: 72 %", "Battery: 72 % — charging", "Battery: 72 % — plugged in" (powered but
+    /// not charging, e.g. full), "Battery: —" (unknown or not reported yet).
+    static func batteryText(_ status: HeadsetStatus?) -> String {
+        guard let status, let percent = status.battery else { return "Battery: —" }
+        if status.isCharging { return "Battery: \(percent) % — charging" }
+        if status.isPluggedIn { return "Battery: \(percent) % — plugged in" }
+        return "Battery: \(percent) %"
+    }
+
+    /// Log form: "headset battery 72 % charging", "headset battery unknown".
+    static func batteryLogText(_ status: HeadsetStatus) -> String {
+        var text = "headset battery " + (status.battery.map { "\($0) %" } ?? "unknown")
+        if status.isCharging { text += " charging" } else if status.isPluggedIn { text += " plugged in" }
+        return text
     }
 
     /// Writes a pending settings change now (before quitting).

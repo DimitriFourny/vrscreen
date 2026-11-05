@@ -112,7 +112,7 @@ what it is waiting for, and the surroundings are never dimmed.
 Without the Accessibility permission, the scroll also reaches the app under the cursor; with it,
 the sender swallows the mouse and scroll events while ⌃⌥⌘ is held.
 
-**Menu-bar icon:** connection status, *Curved screen* and *Dim surroundings* sliders, *Hand
+**Menu-bar icon:** connection status and headset battery, *Curved screen* and *Dim surroundings* sliders, *Hand
 gestures* checkbox, *Audio in headset* (on by default) and *Mute Mac while mirroring* (off by
 default) checkboxes, Re-center, Reset placement, travel-mode status and *Open Quick Settings in
 headset* (USB only), Quit. These settings live on the Mac; the screen settings are sent to the

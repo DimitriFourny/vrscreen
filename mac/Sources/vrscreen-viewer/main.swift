@@ -15,6 +15,7 @@ do {
 let queue = DispatchQueue(label: "vrscreen.viewer", qos: .userInteractive)
 let discoverer = options.discover ? Discoverer(port: options.discoveryPort, queue: queue) : nil
 let client = ViewerClient(host: options.host, port: options.port, discoverer: discoverer, queue: queue)
+client.headsetStatus = options.fakeBattery
 let decoder = VideoDecoder()
 let window: ViewerWindow? = options.headless ? nil : ViewerWindow()
 let audio = AudioReceiver(wavPath: options.audioWavPath, detectOnsets: options.avSync)

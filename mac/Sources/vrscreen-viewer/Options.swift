@@ -12,6 +12,8 @@ struct ViewerOptions {
     var durationSeconds: Double?
     var audioWavPath: String?
     var avSync = false
+    /// --fake-battery: HEADSET_STATUS to send, as a headset would.
+    var fakeBattery: HeadsetStatus?
 
     static let usage = """
     Usage: vrscreen-viewer [options]
@@ -29,6 +31,9 @@ struct ViewerOptions {
                                silence by timestamp, so file time follows capture time).
       --av-sync                Pair the test source's white flashes with its beeps and
                                log audio − video (use with vrscreen-sender --source test).
+      --fake-battery SPEC      Send HEADSET_STATUS like a headset: PERCENT or "unknown",
+                               optionally followed by ",charging" and/or ",plugged",
+                               e.g. "72,charging" (on connect, then every 60 s).
       -h, --help               Show this help.
     """
 
@@ -60,6 +65,7 @@ struct ViewerOptions {
                 o.durationSeconds = d
             case "--audio-wav": o.audioWavPath = try value(arg)
             case "--av-sync": o.avSync = true
+            case "--fake-battery": o.fakeBattery = try parseFakeBattery(try value(arg))
             case "-h", "--help":
                 print(usage)
                 exit(0)
@@ -71,6 +77,29 @@ struct ViewerOptions {
             throw OptionError("--exit-after-snapshot requires --snapshot")
         }
         return o
+    }
+
+    /// "72", "72,charging", "100,plugged", "unknown,charging,plugged".
+    static func parseFakeBattery(_ spec: String) throws -> HeadsetStatus {
+        let parts = spec.split(separator: ",").map { $0.trimmingCharacters(in: .whitespaces).lowercased() }
+        guard let first = parts.first else { throw OptionError("--fake-battery: empty value") }
+        let percent: UInt8?
+        if first == "unknown" {
+            percent = nil
+        } else if let value = UInt8(first), value <= 100 {
+            percent = value
+        } else {
+            throw OptionError("--fake-battery: '\(first)' must be 0-100 or unknown")
+        }
+        var charging = false, plugged = false
+        for flag in parts.dropFirst() {
+            switch flag {
+            case "charging": charging = true
+            case "plugged": plugged = true
+            default: throw OptionError("--fake-battery: unknown flag '\(flag)' (charging, plugged)")
+            }
+        }
+        return HeadsetStatus(batteryPercent: percent, charging: charging, pluggedIn: plugged)
     }
 }
 

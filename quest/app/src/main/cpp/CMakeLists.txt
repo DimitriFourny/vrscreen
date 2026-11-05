@@ -15,6 +15,7 @@ target_include_directories(native_app_glue PUBLIC ${ANDROID_NDK}/sources/android
 add_library(vrscreen SHARED
     main.cpp
     audio_output.cpp
+    battery_monitor.cpp
     audio_playout.cpp
     xr_app.cpp
     grab.cpp

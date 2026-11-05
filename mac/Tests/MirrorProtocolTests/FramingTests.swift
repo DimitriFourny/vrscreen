@@ -18,6 +18,7 @@ private let sampleMessages: [Message] = [
     .audioConfig(.standard),
     .audio(AudioMessage(captureTimeMicros: 1_234_567, pcm: Data((0..<1920).map { UInt8(truncatingIfNeeded: $0 * 7) }))),
     .audio(AudioMessage(captureTimeMicros: 1_244_567, pcm: Data())),
+    .headsetStatus(HeadsetStatus(batteryPercent: 72, charging: true, pluggedIn: false)),
 ]
 
 private func stream() -> Data {

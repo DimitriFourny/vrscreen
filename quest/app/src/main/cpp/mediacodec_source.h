@@ -36,6 +36,9 @@ public:
     uint64_t statusGeneration() const override { return statusGeneration_.load(); }
     std::string statusText() const override;
 
+    // Thread-safe: the latest battery reading, reported to the Mac (HEADSET_STATUS).
+    void setHeadsetStatus(const HeadsetStatus& status) { client_.setHeadsetStatus(status); }
+
 private:
     // StreamListener (network thread)
     void onSearching(const SearchState& state) override;

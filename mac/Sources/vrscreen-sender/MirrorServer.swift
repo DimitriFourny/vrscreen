@@ -83,6 +83,8 @@ final class MirrorServer {
     private(set) var audioChunksDropped = 0
     /// Called on `queue` with the active client's address, or nil when none is connected.
     var onActiveClientChanged: ((String?) -> Void)?
+    /// Called on `queue` with each HEADSET_STATUS from the active client.
+    var onHeadsetStatus: ((HeadsetStatus) -> Void)?
 
     private(set) var activeClient: ClientSession?
     private(set) var bytesSent = 0
@@ -380,12 +382,18 @@ final class MirrorServer {
             return drop(client, reason: "read error: \(String(cString: strerror(errno)))")
         }
         client.reader.append(Data(readBuffer[0..<n]))
-        do {
-            while let message = try client.reader.next() {
+        // A malformed HEADSET_STATUS is logged and skipped (the reader has already moved
+        // past it); any other protocol error ends the connection.
+        while true {
+            do {
+                guard let message = try client.reader.next() else { return }
                 handle(message, from: client)
+            } catch .malformed(let type, let reason) where type == MessageType.headsetStatus.rawValue {
+                log("server: client \(client.address) sent a malformed HEADSET_STATUS (\(reason)); ignored")
+            } catch {
+                return drop(client, reason: "protocol error: \(error)")
             }
-        } catch {
-            drop(client, reason: "protocol error: \(error)")
+            guard client.isActive else { return }
         }
     }
 
@@ -407,6 +415,8 @@ final class MirrorServer {
                     + "send buffer \(size / 1024) KiB")
             }
             onFrameAck?(client)
+        case .headsetStatus(let status):
+            if client === activeClient { onHeadsetStatus?(status) }
         case .unknown:
             break // Forward compatibility: skip unknown types.
         case .config, .frame, .control, .audioConfig, .audio, .pong:
