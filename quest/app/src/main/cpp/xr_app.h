@@ -5,6 +5,7 @@
 #include "grab.h"
 #include "hand_gestures.h"
 #include "hand_tracker.h"
+#include "rotating_log.h"
 #include "screen_source.h"
 #include "status_panel.h"
 #include "walking_detector.h"
@@ -191,6 +192,9 @@ private:
     PFN_xrPassthroughLayerSetStyleFB pfnPassthroughLayerSetStyleFB = nullptr;
     // Hiding the Guardian boundary (passthrough-only app): when to request it, dim floor.
     BoundarySuppression boundary_;
+    // Boundary and session history that survives logcat rotation: files/boundary.log.
+    RotatingLog boundaryLog_;
+    void logBoundary(bool warning, const char* format, ...) __attribute__((format(printf, 3, 4)));
 
     // Placement
     Placement placement_;

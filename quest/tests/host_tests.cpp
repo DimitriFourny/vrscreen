@@ -7,13 +7,20 @@
 #include "grab.h"
 #include "hand_gestures.h"
 #include "headset_status.h"
+#include "rotating_log.h"
 #include "test_support.h"
 #include "walking_detector.h"
 #include "wire.h"
 #include "xr_math.h"
 
+#include <sys/stat.h>
+#include <unistd.h>
+
+#include <algorithm>
+#include <cctype>
 #include <cmath>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <string>
 #include <vector>
@@ -759,56 +766,116 @@ TEST(dimLiftsAtOnceWhileWalkingAndFadesBack) {
 
 // ---- Boundary suppression (XR_META_boundary_visibility) ------------------------------------------
 
-TEST(boundaryRequestedOnceThePassthroughIsOnScreen) {
-    BoundarySuppression b;
-    CHECK(!b.shouldRequest(0.0, false));  // nothing submitted yet: the runtime would refuse
-    CHECK(b.shouldRequest(0.1, true));
-    CHECK(!b.onRequestResult(true, false, 1.0f));
-    CHECK(!b.shouldRequest(0.2, true));   // accepted: no more requests
-    CHECK(!b.onVisibilityChanged(true, 1.0f));
-    CHECK(b.suppressed());
-    CHECK(!b.shouldRequest(10.0, true));
+using Outcome = BoundarySuppression::Outcome;
+
+// Runs frames at 72 Hz from `from` to `to` seconds; each request gets the next outcome from
+// `outcomes` (the last one repeats). Returns the request times.
+std::vector<double> runBoundary(BoundarySuppression& b, double from, double to, bool passthrough,
+                                std::vector<Outcome> outcomes, float opacity = 1.0f) {
+    std::vector<double> requests;
+    for (double t = from; t < to; t += kDt) {
+        if (!b.shouldRequest(t, passthrough)) continue;
+        requests.push_back(t);
+        const Outcome o = outcomes[std::min(requests.size() - 1, outcomes.size() - 1)];
+        b.onRequestResult(o, t, opacity);
+    }
+    return requests;
 }
 
-TEST(boundaryRerequestedWhenShownAgainOrResumed) {
+TEST(boundaryRequestedAfterPassthroughSettles) {
     BoundarySuppression b;
-    CHECK(b.shouldRequest(0.0, true));
-    b.onRequestResult(true, false, 1.0f);
+    b.onSessionStarted();
+    CHECK(runBoundary(b, 0.0, 1.0, false, {Outcome::Success}).empty());  // no passthrough yet
+    const std::vector<double> r = runBoundary(b, 1.0, 3.0, true, {Outcome::Success});
+    CHECK(r.size() == 1);                      // once, then done
+    CHECK_NEAR(r[0], 1.5, 0.02);               // after 0.5 s of passthrough frames
     b.onVisibilityChanged(true, 1.0f);
-    // The system showed it again (e.g. after the Meta menu): request again, rate-limited.
-    CHECK(!b.onVisibilityChanged(false, 1.0f));
-    CHECK(b.shouldRequest(5.0, true));
-    b.onRequestResult(false, true, 1.0f);    // refused (passthrough not on screen yet)
-    CHECK(!b.shouldRequest(6.0, true));      // within kRetrySeconds
-    CHECK(b.shouldRequest(7.1, true));
-    b.onRequestResult(true, false, 1.0f);
-    // Paused and resumed: request again once passthrough is back.
-    b.onVisible();
-    CHECK(!b.suppressed());
-    CHECK(!b.shouldRequest(20.0, false));
-    CHECK(b.shouldRequest(20.1, true));
-    CHECK(b.opacityFloor() == 0.0f);  // never objected at full opacity: no dim cap
+    CHECK(b.suppressed() && !b.pending());
+    CHECK(runBoundary(b, 3.0, 10.0, true, {Outcome::Success}).empty());
+}
+
+TEST(boundaryFrameWithoutPassthroughRestartsTheSettle) {
+    BoundarySuppression b;
+    b.onSessionStarted();
+    CHECK(runBoundary(b, 0.0, 0.4, true, {Outcome::Success}).empty());
+    CHECK(runBoundary(b, 0.4, 0.45, false, {Outcome::Success}).empty());  // a frame without it
+    const std::vector<double> r = runBoundary(b, 0.45, 2.0, true, {Outcome::Success});
+    CHECK(r.size() == 1 && r[0] >= 0.95);
+}
+
+TEST(boundaryResumeFailuresBackOff) {
+    // What the headset did after a pause/resume: the boundary came back, requests failed with
+    // XR_ERROR_RUNTIME_FAILURE. Retries 0.5, 1, 2, 4, 4 ... s apart until one succeeds.
+    BoundarySuppression b;
+    b.onSessionStarted();
+    runBoundary(b, 0.0, 2.0, true, {Outcome::Success});
+    b.onVisibilityChanged(true, 1.0f);
+    // Paused and resumed.
+    b.onSessionStarted();
+    CHECK(!b.suppressed() && b.pending());
+    b.onVisibilityChanged(false, 1.0f);
+    const std::vector<double> r = runBoundary(
+        b, 10.0, 30.0, true,
+        {Outcome::Failed, Outcome::Failed, Outcome::Failed, Outcome::Failed, Outcome::Failed, Outcome::Success});
+    CHECK(r.size() == 6);
+    const double gaps[] = {0.5, 1.0, 2.0, 4.0, 4.0};
+    CHECK_NEAR(r[0], 10.5, 0.02);  // settle after the resume
+    for (size_t i = 0; i + 1 < r.size() && i < 5; ++i) CHECK_NEAR(r[i + 1] - r[i], gaps[i], 0.02);
+    CHECK(!b.pending());
+    CHECK(b.opacityFloor() == 0.0f);  // failures at full opacity never cap the dim
+    // Success reset the backoff: the next failure retries after 0.5 s again.
+    b.onVisibilityChanged(false, 1.0f);
+    const std::vector<double> again = runBoundary(b, 40.0, 45.0, true, {Outcome::Failed, Outcome::Success});
+    CHECK(again.size() == 2);
+    CHECK_NEAR(again[1] - again[0], 0.5, 0.02);
 }
 
 TEST(boundaryRefusedWhileFullyDimmedCapsTheDim) {
     BoundarySuppression b;
-    CHECK(b.shouldRequest(0.0, true));
+    b.onSessionStarted();
     // Refused while the passthrough is invisible (dim 100 %): floor the opacity, retry later.
-    CHECK(b.onRequestResult(false, true, 0.0f));
+    const std::vector<double> r = runBoundary(b, 0.0, 1.2, true, {Outcome::NotAllowed, Outcome::Success}, 0.0f);
+    CHECK(r.size() == 2);
     CHECK_NEAR(b.opacityFloor(), BoundarySuppression::kOpacityFloor, 1e-9);
-    CHECK(!b.onRequestResult(false, true, 0.0f));  // already capped: reported once
-    CHECK(b.shouldRequest(2.5, true));
-    // Dropped later while (almost) invisible: same floor, still only once.
+    CHECK(!b.onRequestResult(Outcome::NotAllowed, 2.0, 0.0f));  // already capped: reported once
+    // Dropped later while (almost) invisible: same floor.
     BoundarySuppression c;
-    c.shouldRequest(0.0, true);
-    c.onRequestResult(true, false, 0.3f);
     c.onVisibilityChanged(true, 0.3f);
     CHECK(c.onVisibilityChanged(false, 0.02f));
     CHECK_NEAR(c.opacityFloor(), BoundarySuppression::kOpacityFloor, 1e-9);
-    // Shown again at a visible opacity: unrelated to the dim, no cap.
+    // A runtime failure or a drop at a visible opacity: unrelated to the dim, no cap.
     BoundarySuppression d;
     CHECK(!d.onVisibilityChanged(false, 0.5f));
+    CHECK(!d.onRequestResult(Outcome::Failed, 1.0, 0.0f));
     CHECK(d.opacityFloor() == 0.0f);
+}
+
+// ---- Rotating log (files/boundary.log) ---------------------------------------------------------
+
+TEST(rotatingLogKeepsTwoGenerations) {
+    char dir[] = "/tmp/vrscreen-logtest-XXXXXX";
+    CHECK(mkdtemp(dir) != nullptr);
+    const std::string path = std::string(dir) + "/boundary.log";
+    RotatingLog log(path, 200);
+    for (int i = 0; i < 20; ++i) log.write("event %02d with some text to fill the line", i);
+    auto read = [](const std::string& p) {
+        std::string s;
+        if (FILE* f = std::fopen(p.c_str(), "r")) {
+            char buf[4096];
+            s.assign(buf, std::fread(buf, 1, sizeof(buf), f));
+            std::fclose(f);
+        }
+        return s;
+    };
+    const std::string current = read(path), previous = read(path + ".1");
+    CHECK(!previous.empty());
+    CHECK(current.size() <= 260 && previous.size() <= 260);      // ~maxBytes + one line each
+    CHECK(current.find("event 19") != std::string::npos || previous.find("event 19") != std::string::npos);
+    CHECK(current.find("event 00") == std::string::npos && previous.find("event 00") == std::string::npos);
+    CHECK(std::isdigit(static_cast<unsigned char>(previous[0])) && previous[4] == '-');  // "YYYY-MM-DD ..."
+    std::remove(path.c_str());
+    std::remove((path + ".1").c_str());
+    rmdir(dir);
 }
 
 }  // namespace

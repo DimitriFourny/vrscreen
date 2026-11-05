@@ -374,7 +374,8 @@ compared with none. Mode 0 submits the quad without any layer-settings struct.
 - `walking_detector.h` — `WalkingDetector`: walking vs. seated head motion, for lifting the dim
   (host-tested).
 - `boundary_suppression.h` — `BoundarySuppression`: when to ask the runtime to hide the Guardian
-  boundary and the dim floor if it objects (host-tested).
+  boundary (settle after each start, backoff on failure) and the dim floor if it objects;
+  `rotating_log.h` — the small dated log file (`files/boundary.log`). Both host-tested.
 - `screen_source.h` — the seam between the XR shell and the content (`ScreenSource`/`ScreenHost`,
   `ScreenCommand`).
 - `mediacodec_source.{h,cpp}` — the `ScreenSource`: glues the network client to the decoder and
@@ -433,12 +434,18 @@ Runtime facts found on this Quest 3 (runtime "Oculus 209.166.0"):
   to your boundary" when you step outside the Guardian, the app asks the runtime to hide it with
   `XR_META_boundary_visibility` (`xrRequestBoundaryVisibilityMETA(SUPPRESSED)`, permission
   `com.oculus.permission.BOUNDARY_VISIBILITY`), the way Meta's native XrSceneModel sample does.
-  The runtime only allows it while passthrough is rendered, so the app asks after the first frame
-  that submitted the passthrough layer, and again (at most every 2 s) when the session becomes
-  visible again or the runtime reports the boundary shown again. If the runtime refuses or drops
-  it while the passthrough is (almost) invisible (dim near 100 %), the passthrough opacity gets a
-  floor of 0.05 for the rest of the session. Logged: `Boundary visibility (XR_META_boundary_visibility): supported ...`,
-  `xrRequestBoundaryVisibilityMETA(SUPPRESSED): XR_SUCCESS`, `Boundary visibility changed: ...`.
+  The runtime only allows it while passthrough is rendered and, right after a pause/resume, may
+  fail it (`XR_ERROR_RUNTIME_FAILURE`) even though frames already carry the passthrough layer. So
+  after every `xrBeginSession` (start, resume) and whenever the runtime reports the boundary shown
+  again, the app waits until frames have carried the passthrough layer for 0.5 s without a gap,
+  then asks; a refusal or failure is retried after 0.5, 1, 2, 4, 4 ... s for as long as passthrough
+  is shown (success resets the backoff). If the runtime refuses or drops it while the passthrough
+  is (almost) invisible (dim near 100 %), the passthrough opacity gets a floor of 0.05 for the
+  rest of the session. Logged (logcat and, with the date and time, in `files/boundary.log`, which
+  survives logcat rotation: `adb shell run-as com.df0.vrscreen cat files/boundary.log`, 64 KB, the
+  previous 64 KB in `boundary.log.1`): session state changes, `Session begun: boundary suppression
+  pending ...`, every `xrRequestBoundaryVisibilityMETA(SUPPRESSED) #n: <result> ...; retry in x s`,
+  `Boundary visibility changed: ...`, passthrough state changes and a dim cap if one happens.
   The manifest flag `com.oculus.feature.BOUNDARYLESS_APP` alone did not stop the pause on this
   Horizon OS, and Meta documents it and the boundary API as mutually exclusive, so it is not
   declared. The app uses only the LOCAL and VIEW spaces, never STAGE (ill-defined without a

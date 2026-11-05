@@ -140,6 +140,7 @@ XrApp::XrApp(ANativeActivity* activity, JNIEnv* env, ScreenSource& source)
     if (activity_->internalDataPath != nullptr) {
         mkdir(activity_->internalDataPath, 0700);
         placementPath_ = std::string(activity_->internalDataPath) + "/placement.txt";
+        boundaryLog_.setPath(std::string(activity_->internalDataPath) + "/boundary.log", 64 * 1024);
     }
 }
 
@@ -594,19 +595,20 @@ void XrApp::pollEvents() {
                 logInteractionProfiles();
                 break;
             case XR_TYPE_EVENT_DATA_PASSTHROUGH_STATE_CHANGED_FB:
-                LOGW("Passthrough state changed: flags 0x%" PRIx64,
-                     static_cast<uint64_t>(reinterpret_cast<XrEventDataPassthroughStateChangedFB*>(&event)->flags));
+                logBoundary(true, "Passthrough state changed: flags 0x%" PRIx64,
+                            static_cast<uint64_t>(reinterpret_cast<XrEventDataPassthroughStateChangedFB*>(&event)->flags));
                 break;
             case XR_TYPE_EVENT_DATA_BOUNDARY_VISIBILITY_CHANGED_META: {
                 const bool suppressed =
                     reinterpret_cast<XrEventDataBoundaryVisibilityChangedMETA*>(&event)->boundaryVisibility ==
                     XR_BOUNDARY_VISIBILITY_SUPPRESSED_META;
-                LOGI("Boundary visibility changed: %s (passthrough opacity %.2f)",
-                     suppressed ? "suppressed (hidden)" : "NOT suppressed (shown)", appliedOpacity_);
+                logBoundary(false, "Boundary visibility changed: %s (passthrough opacity %.2f, session %s)",
+                            suppressed ? "suppressed (hidden)" : "NOT suppressed (shown)", appliedOpacity_,
+                            sessionStateName(sessionState_));
                 if (boundary_.onVisibilityChanged(suppressed, appliedOpacity_)) {
-                    LOGW("Boundary shown again while the passthrough was at %.2f opacity: dim capped at %.0f %% "
-                         "opacity loss so it can stay hidden",
-                         appliedOpacity_, 100.0f * (1.0f - BoundarySuppression::kOpacityFloor));
+                    logBoundary(true, "Boundary shown again while the passthrough was at %.2f opacity: dim capped at "
+                                "%.0f %% opacity loss so it can stay hidden",
+                                appliedOpacity_, 100.0f * (1.0f - BoundarySuppression::kOpacityFloor));
                 }
                 break;
             }
@@ -621,6 +623,7 @@ void XrApp::pollEvents() {
 
 void XrApp::handleSessionStateChanged(const XrEventDataSessionStateChanged& event) {
     LOGI("Session state: %s -> %s", sessionStateName(sessionState_), sessionStateName(event.state));
+    boundaryLog_.write("Session state: %s -> %s", sessionStateName(sessionState_), sessionStateName(event.state));
     sessionState_ = event.state;
     focused_ = event.state == XR_SESSION_STATE_FOCUSED;
     // Leaving VISIBLE/FOCUSED pauses the source synchronously, so nothing writes to the quad's
@@ -633,6 +636,12 @@ void XrApp::handleSessionStateChanged(const XrEventDataSessionStateChanged& even
             const XrResult r = xrBeginSession(session_, &beginInfo);
             sessionRunning_ = XR_SUCCEEDED(r);
             LOGI("xrBeginSession: %s", resultString(r).c_str());
+            if (sessionRunning_ && hasBoundaryVisibility_) {
+                // (Re)started: the boundary has to be asked away again once passthrough is back.
+                boundary_.onSessionStarted();
+                logBoundary(false, "Session begun: boundary suppression pending (after %.1f s of passthrough)",
+                            BoundarySuppression::kSettleSeconds);
+            }
             break;
         }
         case XR_SESSION_STATE_STOPPING: {
@@ -659,7 +668,6 @@ void XrApp::updateVisibility() {
     LOGI("Content %s", visible ? "visible: starting screen source" : "hidden: stopping screen source");
     statusDrawn_ = false;  // redraw the status panel once visible again
     if (visible) {
-        boundary_.onVisible();  // hide the boundary again once passthrough is on screen
         // No picture yet after a resume: show the room at once, fade the dim back with the picture.
         dimmer_.reset();
         setPassthroughOpacity(1.0f);
@@ -1145,6 +1153,20 @@ void XrApp::setPassthroughOpacity(float opacity) {
     appliedOpacity_ = opacity;
 }
 
+void XrApp::logBoundary(bool warning, const char* format, ...) {
+    char text[400];
+    va_list args;
+    va_start(args, format);
+    std::vsnprintf(text, sizeof(text), format, args);
+    va_end(args);
+    if (warning) {
+        LOGW("%s", text);
+    } else {
+        LOGI("%s", text);
+    }
+    boundaryLog_.write("%s", text);
+}
+
 void XrApp::flushControlBurstLog() {
     if (controlBurstCount_ == 0) return;
     LOGI("Mac CONTROL %s stream of %u command(s): screen (%.2f, %.2f, %.2f) -> (%.2f, %.2f, %.2f), "
@@ -1427,18 +1449,29 @@ void XrApp::renderFrame() {
     r = xrEndFrame(session_, &endInfo);
     if (XR_FAILED(r)) LOGE("xrEndFrame (%u layers): %s", layerCount, resultString(r).c_str());
 
-    // Hide the Guardian boundary once passthrough is actually on screen (the runtime refuses
-    // before), and again whenever it comes back (BoundarySuppression decides when).
+    // Hide the Guardian boundary once passthrough has been on screen for a moment after each
+    // (re)start, and again whenever it comes back; retries with backoff (BoundarySuppression).
     const bool passthroughSubmitted = XR_SUCCEEDED(r) && layerCount > 0;
-    if (hasBoundaryVisibility_ &&
-        boundary_.shouldRequest(static_cast<double>(frameState.predictedDisplayTime) / 1e9, passthroughSubmitted)) {
+    const double nowSeconds = static_cast<double>(frameState.predictedDisplayTime) / 1e9;
+    if (hasBoundaryVisibility_ && boundary_.shouldRequest(nowSeconds, passthroughSubmitted)) {
         const XrResult b = pfnRequestBoundaryVisibilityMETA(session_, XR_BOUNDARY_VISIBILITY_SUPPRESSED_META);
-        const bool notAllowed = b == XR_BOUNDARY_VISIBILITY_SUPPRESSION_NOT_ALLOWED_META;
-        LOGI("xrRequestBoundaryVisibilityMETA(SUPPRESSED): %s (passthrough opacity %.2f)", resultString(b).c_str(),
-             appliedOpacity_);
-        if (boundary_.onRequestResult(b == XR_SUCCESS, notAllowed, appliedOpacity_)) {
-            LOGW("Boundary suppression refused at %.2f passthrough opacity: dim capped at %.0f %% opacity loss",
-                 appliedOpacity_, 100.0f * (1.0f - BoundarySuppression::kOpacityFloor));
+        const BoundarySuppression::Outcome outcome = b == XR_SUCCESS ? BoundarySuppression::Outcome::Success
+                                                     : b == XR_BOUNDARY_VISIBILITY_SUPPRESSION_NOT_ALLOWED_META
+                                                         ? BoundarySuppression::Outcome::NotAllowed
+                                                         : BoundarySuppression::Outcome::Failed;
+        const bool floorRaised = boundary_.onRequestResult(outcome, nowSeconds, appliedOpacity_);
+        if (outcome == BoundarySuppression::Outcome::Success) {
+            logBoundary(false, "xrRequestBoundaryVisibilityMETA(SUPPRESSED) #%d: %s (passthrough opacity %.2f)",
+                        boundary_.attempts(), resultString(b).c_str(), appliedOpacity_);
+        } else {
+            logBoundary(true, "xrRequestBoundaryVisibilityMETA(SUPPRESSED) #%d: %s (passthrough opacity %.2f); "
+                        "retry in %.1f s",
+                        boundary_.attempts(), resultString(b).c_str(), appliedOpacity_,
+                        boundary_.nextAttemptAt() - nowSeconds);
+        }
+        if (floorRaised) {
+            logBoundary(true, "Boundary suppression refused at %.2f passthrough opacity: dim capped at %.0f %% "
+                        "opacity loss", appliedOpacity_, 100.0f * (1.0f - BoundarySuppression::kOpacityFloor));
         }
     }
 
