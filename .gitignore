@@ -5,5 +5,9 @@
 .swiftpm/
 *.dSYM/
 
-# Built app bundles and zips (scripts/build-app.sh)
+# Built app bundles and zips (scripts/build-app.sh, windows/build.ps1 -Dist)
 /build/
+
+# Windows CMake builds (windows/build.ps1)
+/windows/build/
+/windows/vrscreen-headset.apk

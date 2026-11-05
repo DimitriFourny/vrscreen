@@ -40,7 +40,7 @@ adb shell am force-stop com.df0.vrscreen       # stop
 
 It also appears in the headset library as "VRScreen" (Unknown Sources). Start order does not
 matter: the app keeps looking and shows what it is doing on a panel in front of you ("Looking for
-the Mac over USB and Wi-Fi ...", what each transport answered, "Connected over Wi-Fi 192.168.1.10
+the Mac or PC over USB and Wi-Fi ...", what each transport answered, "Connected over Wi-Fi 192.168.1.10
 (My Mac)", "... waiting for a picture").
 
 ### USB or Wi-Fi

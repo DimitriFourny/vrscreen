@@ -1,0 +1,25 @@
+#include <winres.h>
+
+VS_VERSION_INFO VERSIONINFO
+ FILEVERSION @VRSCREEN_MAJOR@,@VRSCREEN_MINOR@,@VRSCREEN_PATCH@,0
+ PRODUCTVERSION @VRSCREEN_MAJOR@,@VRSCREEN_MINOR@,@VRSCREEN_PATCH@,0
+ FILEOS VOS_NT_WINDOWS32
+ FILETYPE VFT_APP
+BEGIN
+    BLOCK "StringFileInfo"
+    BEGIN
+        BLOCK "040904b0"
+        BEGIN
+            VALUE "FileDescription", "VRScreen - PC screen mirroring for Meta Quest"
+            VALUE "FileVersion", "@VRSCREEN_VERSION@"
+            VALUE "ProductName", "VRScreen"
+            VALUE "ProductVersion", "@VRSCREEN_VERSION@"
+            VALUE "OriginalFilename", "vrscreen-sender.exe"
+            VALUE "LegalCopyright", "MIT License"
+        END
+    END
+    BLOCK "VarFileInfo"
+    BEGIN
+        VALUE "Translation", 0x409, 1200
+    END
+END

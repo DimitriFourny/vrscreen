@@ -1,8 +1,9 @@
 # VRScreen wire protocol, version 1
 
-This is the contract between the Mac sender (`vrscreen-sender`) and any client:
-the Mac test viewer (`vrscreen-viewer`) and the Quest app (C++/NDK,
-`AMediaCodec`). A client can be written from this document alone.
+This is the contract between the senders (`vrscreen-sender` on macOS, `mac/`, and on Windows,
+`windows/`) and any client: the test viewers (`vrscreen-viewer`, Mac and Windows) and the Quest
+app (C++/NDK, `AMediaCodec`). A client can be written from this document alone. Where the text
+says "the Mac", the Windows sender behaves the same unless noted.
 
 ## Transport
 
@@ -376,6 +377,13 @@ ScreenCaptureKit assigned to the captured image (FRAME), and for system audio th
 the Mac would play it (AUDIO, see there); for the test pattern, the moment the pattern
 was rendered (FRAME) or the synthesized sample time (AUDIO). FRAME and AUDIO timestamps
 are therefore directly comparable for A/V sync.
+
+On the **Windows sender** the clock is `QueryPerformanceCounter` in microseconds: FRAME times are
+the DWM present time Desktop Duplication reports (`LastPresentTime`, or the pointer update time
+for a cursor-only change), AUDIO times the QPC position WASAPI loopback gives for the chunk's
+first sample (its playback time, a few ms ahead of delivery; no output-latency offset is added,
+so AUDIO may arrive slightly before its timestamp, as with the Mac). The Windows sender keeps the
+output device's sample rate (usually 48000 Hz) and always sends stereo.
 
 The client uses any monotonic clock of its own (Android: `CLOCK_MONOTONIC`) for
 `clientTimeMicros`. To estimate the offset between the two clocks:

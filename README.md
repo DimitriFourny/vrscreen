@@ -1,8 +1,12 @@
 # VRScreen
 
-**Mac screen mirroring for Meta Quest.** Your Mac's display floats in front of you as a large,
-sharp screen over passthrough, so you keep seeing your room, your keyboard and your mouse.
-Over a USB cable or Wi-Fi, with about 25 ms from capture to decoded frame at 4K.
+**Mac and PC screen mirroring for Meta Quest.** Your Mac's or Windows PC's display floats in front
+of you as a large, sharp screen over passthrough, so you keep seeing your room, your keyboard and
+your mouse. Over a USB cable or Wi-Fi, with about 25 ms from capture to decoded frame at 4K.
+
+**Windows**: a native tray app (Desktop Duplication + the GPU's hardware HEVC/H.264 encoder +
+WASAPI loopback) speaks the same protocol to the same headset app, at up to 120 fps for games.
+See [`windows/README.md`](windows/README.md). The rest of this page describes the Mac app.
 
 - **Native on both ends**: a Swift sender on the Mac (ScreenCaptureKit + VideoToolbox HEVC) and a
   C++ OpenXR app on the headset that decodes with the hardware decoder straight into a compositor
@@ -53,6 +57,7 @@ same capture clock as the frames; it never waits for the video window, and chunk
 | | Tested | Notes |
 |---|---|---|
 | Mac | Apple Silicon, macOS 27 | Uses the real-time HEVC encoder. Intel Macs are untested. |
+| Windows PC | Windows 11, NVIDIA RTX 4070 | Any GPU with a hardware encoder; see [`windows/README.md`](windows/README.md). |
 | Headset | Meta Quest 3, Horizon OS build 209 | Quest 3S / Pro / 2 are declared in the manifest but untested. |
 | USB | Android platform-tools (`adb`) | Optional: without it, Wi-Fi only. |
 | Building | Xcode Command Line Tools (Swift 6), Homebrew; JDK 17, Android SDK platform 36, build-tools 36.1.0, NDK 30.0.16248370, CMake 4.1.2 | Full Xcode is not needed. Installed below. |
@@ -196,6 +201,7 @@ More detail: [`mac/README.md`](mac/README.md) (sender, viewer, options, permissi
 |---|---|
 | `mac/` | SwiftPM package: `vrscreen-sender`, `vrscreen-viewer` (a Mac test client), the shared `MirrorProtocol` library, tests |
 | `quest/` | Android Gradle project: native OpenXR app (`app/src/main/cpp`), host-side unit tests (`tests/`) |
+| `windows/` | CMake project: `vrscreen-sender` (Windows tray app), `vrscreen-viewer` (test client), unit tests; `build.ps1` |
 | `docs/protocol.md` | Wire protocol (TCP stream, UDP discovery, control messages) |
 | `scripts/build-app.sh` | Builds `build/VRScreen.app` (`--install` into /Applications, `--dist` for a zip) |
 | `scripts/mirror.sh` | Developer wrapper: rebuild and run the sender from source (`--install` the headset app) |
@@ -207,6 +213,7 @@ More detail: [`mac/README.md`](mac/README.md) (sender, viewer, options, permissi
 ```sh
 cd mac && swift build -c release && swift test           # Mac side
 cd quest && ./gradlew assembleDebug                       # headset app
+powershell -File windows\build.ps1                       # Windows side (on Windows)
 cd quest && cmake -S tests -B build/host-tests && cmake --build build/host-tests \
     && ctest --test-dir build/host-tests --output-on-failure   # headset logic on the Mac
 ```
@@ -222,7 +229,8 @@ the dev sender its own ports and settings: `--port 7790 --discovery-port 7791 --
 
 - Audio goes one way (Mac → headset); no microphone.
 - Mirrors one existing display; no extra virtual display.
-- macOS sender only for now; the protocol is OS-independent.
+- Senders for macOS and Windows; the protocol is OS-independent (a Linux sender would follow
+  `docs/protocol.md`).
 - View-only by design: input stays on your real keyboard and mouse.
 
 ## License

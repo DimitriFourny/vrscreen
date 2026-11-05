@@ -1,0 +1,8 @@
+#include <winres.h>
+
+// The app icon (from the Mac icon, windows/scripts/make-ico.ps1): Explorer, Alt+Tab, dialogs.
+1 ICON "vrscreen.ico"
+
+// Per-monitor DPI awareness (Desktop Duplication needs it for DuplicateOutput1), common
+// controls v6, no elevation.
+CREATEPROCESS_MANIFEST_RESOURCE_ID RT_MANIFEST "sender.manifest"

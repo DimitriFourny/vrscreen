@@ -108,7 +108,7 @@ void MediaCodecSource::onSearching(const SearchState& state) {
         text += "Connecting to " + state.overrideEndpoint + " ...\n(set by debug.vrscreen.host)";
         if (!state.wifiResult.empty()) text += "\nLast try: " + clip(state.wifiResult, 38);
     } else {
-        text += "Looking for the Mac over USB and Wi-Fi ...\nStart vrscreen-sender on the Mac.";
+        text += "Looking for the Mac or PC over USB and Wi-Fi ...\nStart VRScreen on the Mac or PC.";
         if (!state.usbResult.empty()) text += "\nUSB: " + clip(state.usbResult, 43);
         if (!state.wifiResult.empty()) text += "\nWi-Fi: " + clip(state.wifiResult, 41);
     }
@@ -119,7 +119,7 @@ void MediaCodecSource::onSearching(const SearchState& state) {
 void MediaCodecSource::onConnected(const std::string& transport) {
     transport_ = transport;
     connected_ = true;
-    setStatus("VRScreen\nConnected over\n" + clip(transport, 50) + "\nWaiting for video from the Mac...");
+    setStatus("VRScreen\nConnected over\n" + clip(transport, 50) + "\nWaiting for video from the computer...");
 }
 
 bool MediaCodecSource::onConfig(const StreamConfig& config) {
