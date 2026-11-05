@@ -1,7 +1,8 @@
 // Host unit tests: hand-gesture state machine, pose filter, facing()/headingOf() near the zenith,
 // highlight geometry, protocol hello/discovery framing, HEADSET_STATUS, the walking detector that
-// lifts the dim (the audio playout is in audio_tests.cpp).
+// lifts the dim, boundary suppression (the audio playout is in audio_tests.cpp).
 
+#include "boundary_suppression.h"
 #include "dim_controller.h"
 #include "grab.h"
 #include "hand_gestures.h"
@@ -754,6 +755,60 @@ TEST(dimLiftsAtOnceWhileWalkingAndFadesBack) {
     // Settled: back to 0.8 over the fade.
     for (int i = 0; i < 18; ++i) v = d.update(true, true, kDt);
     CHECK_NEAR(v, 0.8, 1e-6);
+}
+
+// ---- Boundary suppression (XR_META_boundary_visibility) ------------------------------------------
+
+TEST(boundaryRequestedOnceThePassthroughIsOnScreen) {
+    BoundarySuppression b;
+    CHECK(!b.shouldRequest(0.0, false));  // nothing submitted yet: the runtime would refuse
+    CHECK(b.shouldRequest(0.1, true));
+    CHECK(!b.onRequestResult(true, false, 1.0f));
+    CHECK(!b.shouldRequest(0.2, true));   // accepted: no more requests
+    CHECK(!b.onVisibilityChanged(true, 1.0f));
+    CHECK(b.suppressed());
+    CHECK(!b.shouldRequest(10.0, true));
+}
+
+TEST(boundaryRerequestedWhenShownAgainOrResumed) {
+    BoundarySuppression b;
+    CHECK(b.shouldRequest(0.0, true));
+    b.onRequestResult(true, false, 1.0f);
+    b.onVisibilityChanged(true, 1.0f);
+    // The system showed it again (e.g. after the Meta menu): request again, rate-limited.
+    CHECK(!b.onVisibilityChanged(false, 1.0f));
+    CHECK(b.shouldRequest(5.0, true));
+    b.onRequestResult(false, true, 1.0f);    // refused (passthrough not on screen yet)
+    CHECK(!b.shouldRequest(6.0, true));      // within kRetrySeconds
+    CHECK(b.shouldRequest(7.1, true));
+    b.onRequestResult(true, false, 1.0f);
+    // Paused and resumed: request again once passthrough is back.
+    b.onVisible();
+    CHECK(!b.suppressed());
+    CHECK(!b.shouldRequest(20.0, false));
+    CHECK(b.shouldRequest(20.1, true));
+    CHECK(b.opacityFloor() == 0.0f);  // never objected at full opacity: no dim cap
+}
+
+TEST(boundaryRefusedWhileFullyDimmedCapsTheDim) {
+    BoundarySuppression b;
+    CHECK(b.shouldRequest(0.0, true));
+    // Refused while the passthrough is invisible (dim 100 %): floor the opacity, retry later.
+    CHECK(b.onRequestResult(false, true, 0.0f));
+    CHECK_NEAR(b.opacityFloor(), BoundarySuppression::kOpacityFloor, 1e-9);
+    CHECK(!b.onRequestResult(false, true, 0.0f));  // already capped: reported once
+    CHECK(b.shouldRequest(2.5, true));
+    // Dropped later while (almost) invisible: same floor, still only once.
+    BoundarySuppression c;
+    c.shouldRequest(0.0, true);
+    c.onRequestResult(true, false, 0.3f);
+    c.onVisibilityChanged(true, 0.3f);
+    CHECK(c.onVisibilityChanged(false, 0.02f));
+    CHECK_NEAR(c.opacityFloor(), BoundarySuppression::kOpacityFloor, 1e-9);
+    // Shown again at a visible opacity: unrelated to the dim, no cap.
+    BoundarySuppression d;
+    CHECK(!d.onVisibilityChanged(false, 0.5f));
+    CHECK(d.opacityFloor() == 0.0f);
 }
 
 }  // namespace

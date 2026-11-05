@@ -6,10 +6,13 @@
     <uses-feature android:name="android.hardware.vr.headtracking" android:required="true" android:version="1" />
     <!-- XR_FB_passthrough is only granted to apps that declare the passthrough feature. -->
     <uses-feature android:name="com.oculus.feature.PASSTHROUGH" android:required="true" />
-    <!-- Passthrough-only MR app without a play area: Horizon does not pause it when the user steps
-         outside the boundary. The app only uses LOCAL and VIEW spaces (never STAGE, which is
-         ill-defined without a boundary). -->
-    <uses-feature android:name="com.oculus.feature.BOUNDARYLESS_APP" android:required="true" />
+    <!-- Passthrough-only MR app: it hides the Guardian boundary at runtime with
+         XR_META_boundary_visibility (as Meta's native XrSceneModel sample does), which needs this
+         permission. Deliberately no com.oculus.feature.BOUNDARYLESS_APP: Meta documents the
+         manifest flag and the boundary API as mutually exclusive, and the flag alone did not stop
+         "return to your boundary" on Horizon OS here. The app only uses LOCAL and VIEW spaces
+         (never STAGE, which is ill-defined without a boundary). -->
+    <uses-permission android:name="com.oculus.permission.BOUNDARY_VISIBILITY" />
     <uses-feature android:glEsVersion="0x00030002" android:required="true" />
     <!-- Optional hand-tracking gestures (pinch to move, two hands to resize); controllers still work. -->
     <uses-feature android:name="oculus.software.handtracking" android:required="false" />

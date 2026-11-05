@@ -1,5 +1,6 @@
 #pragma once
 
+#include "boundary_suppression.h"
 #include "dim_controller.h"
 #include "grab.h"
 #include "hand_gestures.h"
@@ -130,6 +131,8 @@ private:
     bool hasImageLayout_ = false;    // XR_FB_composition_layer_image_layout
     bool hasHandTracking_ = false;   // XR_EXT_hand_tracking
     bool hasHandTrackingAim_ = false;  // XR_FB_hand_tracking_aim
+    bool hasBoundaryVisibility_ = false;  // XR_META_boundary_visibility, supported by the system
+    PFN_xrRequestBoundaryVisibilityMETA pfnRequestBoundaryVisibilityMETA = nullptr;
     PFN_xrGetOpenGLESGraphicsRequirementsKHR pfnGetOpenGLESGraphicsRequirementsKHR = nullptr;
     PFN_xrCreateSwapchainAndroidSurfaceKHR pfnCreateSwapchainAndroidSurfaceKHR = nullptr;
     PFN_xrCreatePassthroughFB pfnCreatePassthroughFB = nullptr;
@@ -186,6 +189,8 @@ private:
     float appliedOpacity_ = 1.0f;  // passthrough style currently set
     float dimGamma_ = kDimGamma;   // debug.vrscreen.dimgamma overrides it for tuning
     PFN_xrPassthroughLayerSetStyleFB pfnPassthroughLayerSetStyleFB = nullptr;
+    // Hiding the Guardian boundary (passthrough-only app): when to request it, dim floor.
+    BoundarySuppression boundary_;
 
     // Placement
     Placement placement_;

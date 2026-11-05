@@ -271,7 +271,7 @@ flat and the surroundings normal):
   (searching, connecting, waiting for the first frame, decoder restart) the dim is kept for 1.5 s,
   so a quick reconnect does not flash, then fades out over 0.3 s; it fades back in over 0.3 s
   once a picture is shown again. Coming back to the app (session visible again) starts undimmed.
-  **Walking lifts the dim** (`walking_detector.h`): the app is boundaryless (below), so nothing
+  **Walking lifts the dim** (`walking_detector.h`): the app hides the boundary (below), so nothing
   else stops you from walking around a dark room. When the head moves more than 0.6 m
   horizontally from where it was when the dim took effect, or faster than 0.5 m/s for 0.3 s once
   it is 0.35 m or more from there, the room fades back to fully visible (0.3 s) and stays so until
@@ -373,6 +373,8 @@ compared with none. Mode 0 submits the quad without any layer-settings struct.
   while walking) and `passthroughOpacity()` (perceptual SET_DIM mapping).
 - `walking_detector.h` — `WalkingDetector`: walking vs. seated head motion, for lifting the dim
   (host-tested).
+- `boundary_suppression.h` — `BoundarySuppression`: when to ask the runtime to hide the Guardian
+  boundary and the dim floor if it objects (host-tested).
 - `screen_source.h` — the seam between the XR shell and the content (`ScreenSource`/`ScreenHost`,
   `ScreenCommand`).
 - `mediacodec_source.{h,cpp}` — the `ScreenSource`: glues the network client to the decoder and
@@ -427,9 +429,18 @@ Runtime facts found on this Quest 3 (runtime "Oculus 209.166.0"):
   on the cylinder.
 - No projection layer is needed: frames contain only the passthrough layer and one screen layer
   (quad or cylinder), plus the highlight frame behind it while the screen is grabbed.
-- **Boundaryless**: the manifest declares `com.oculus.feature.BOUNDARYLESS_APP` (Meta's
-  boundaryless mixed-reality mode: passthrough only, no immersive content), so Horizon does not
-  pause the app with "go back inside your boundary" when you step outside the Guardian. The app
-  uses only the LOCAL and VIEW spaces, never STAGE (ill-defined without a boundary); a system
-  recenter still moves LOCAL, which the app follows by re-placing the screen. See the walking
-  rule under "Dim" for the one safety measure this needs.
+- **No boundary** (`boundary_suppression.h`): so that Horizon does not pause the app with "return
+  to your boundary" when you step outside the Guardian, the app asks the runtime to hide it with
+  `XR_META_boundary_visibility` (`xrRequestBoundaryVisibilityMETA(SUPPRESSED)`, permission
+  `com.oculus.permission.BOUNDARY_VISIBILITY`), the way Meta's native XrSceneModel sample does.
+  The runtime only allows it while passthrough is rendered, so the app asks after the first frame
+  that submitted the passthrough layer, and again (at most every 2 s) when the session becomes
+  visible again or the runtime reports the boundary shown again. If the runtime refuses or drops
+  it while the passthrough is (almost) invisible (dim near 100 %), the passthrough opacity gets a
+  floor of 0.05 for the rest of the session. Logged: `Boundary visibility (XR_META_boundary_visibility): supported ...`,
+  `xrRequestBoundaryVisibilityMETA(SUPPRESSED): XR_SUCCESS`, `Boundary visibility changed: ...`.
+  The manifest flag `com.oculus.feature.BOUNDARYLESS_APP` alone did not stop the pause on this
+  Horizon OS, and Meta documents it and the boundary API as mutually exclusive, so it is not
+  declared. The app uses only the LOCAL and VIEW spaces, never STAGE (ill-defined without a
+  boundary); a system recenter still moves LOCAL, which the app follows by re-placing the screen.
+  See the walking rule under "Dim" for the safety measure this needs.

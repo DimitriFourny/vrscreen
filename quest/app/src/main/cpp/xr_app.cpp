@@ -227,11 +227,17 @@ bool XrApp::createInstance() {
     if (hasHandTracking_) enabled.push_back(XR_EXT_HAND_TRACKING_EXTENSION_NAME);
     hasHandTrackingAim_ = hasHandTracking_ && hasExtension(available, XR_FB_HAND_TRACKING_AIM_EXTENSION_NAME);
     if (hasHandTrackingAim_) enabled.push_back(XR_FB_HAND_TRACKING_AIM_EXTENSION_NAME);
+    // Hiding the Guardian boundary: a passthrough-only app must not be paused with "return to
+    // your boundary" (needs com.oculus.permission.BOUNDARY_VISIBILITY in the manifest).
+    hasBoundaryVisibility_ = hasExtension(available, XR_META_BOUNDARY_VISIBILITY_EXTENSION_NAME);
+    if (hasBoundaryVisibility_) enabled.push_back(XR_META_BOUNDARY_VISIBILITY_EXTENSION_NAME);
     for (const char* name : enabled) LOGI("Enabling extension %s", name);
     if (!hasLayerSettings_) LOGW("%s not available: quad sharpening/super-sampling disabled",
                                  XR_FB_COMPOSITION_LAYER_SETTINGS_EXTENSION_NAME);
     if (!hasImageLayout_) LOGW("%s not available: the quad will show the Surface upside down",
                                XR_FB_COMPOSITION_LAYER_IMAGE_LAYOUT_EXTENSION_NAME);
+    if (!hasBoundaryVisibility_) LOGW("%s not offered by the runtime: Horizon will show the boundary (and pause the "
+                                      "app) when you step outside it", XR_META_BOUNDARY_VISIBILITY_EXTENSION_NAME);
 
     XrInstanceCreateInfoAndroidKHR androidInfo{XR_TYPE_INSTANCE_CREATE_INFO_ANDROID_KHR};
     androidInfo.applicationVM = activity_->vm;
@@ -252,6 +258,10 @@ bool XrApp::createInstance() {
     LOGI("OpenXR runtime: %s %u.%u.%u", props.runtimeName, XR_VERSION_MAJOR(props.runtimeVersion),
          XR_VERSION_MINOR(props.runtimeVersion), XR_VERSION_PATCH(props.runtimeVersion));
 
+    if (hasBoundaryVisibility_ &&
+        !loadFunction(instance_, "xrRequestBoundaryVisibilityMETA", &pfnRequestBoundaryVisibilityMETA)) {
+        hasBoundaryVisibility_ = false;
+    }
     return loadFunction(instance_, "xrGetOpenGLESGraphicsRequirementsKHR", &pfnGetOpenGLESGraphicsRequirementsKHR) &&
            loadFunction(instance_, "xrCreateSwapchainAndroidSurfaceKHR", &pfnCreateSwapchainAndroidSurfaceKHR) &&
            loadFunction(instance_, "xrCreatePassthroughFB", &pfnCreatePassthroughFB) &&
@@ -267,9 +277,17 @@ bool XrApp::initSystem() {
     XR_CHECK(xrGetSystem(instance_, &getInfo, &systemId_));
 
     XrSystemPassthroughProperties2FB passthroughProps{XR_TYPE_SYSTEM_PASSTHROUGH_PROPERTIES2_FB};
+    XrSystemBoundaryVisibilityPropertiesMETA boundaryProps{XR_TYPE_SYSTEM_BOUNDARY_VISIBILITY_PROPERTIES_META};
+    if (hasBoundaryVisibility_) passthroughProps.next = &boundaryProps;
     XrSystemProperties props{XR_TYPE_SYSTEM_PROPERTIES};
     props.next = &passthroughProps;
     XR_CHECK(xrGetSystemProperties(instance_, systemId_, &props));
+    if (hasBoundaryVisibility_) {
+        hasBoundaryVisibility_ = boundaryProps.supportsBoundaryVisibility == XR_TRUE;
+        LOGI("Boundary visibility (XR_META_boundary_visibility): %s",
+             hasBoundaryVisibility_ ? "supported; the boundary will be hidden while passthrough is shown"
+                                    : "not supported by this system");
+    }
     LOGI("System: %s (vendor 0x%x), max layers %u, max swapchain %ux%u, passthrough capabilities 0x%" PRIx64,
          props.systemName, props.vendorId, props.graphicsProperties.maxLayerCount,
          props.graphicsProperties.maxSwapchainImageWidth, props.graphicsProperties.maxSwapchainImageHeight,
@@ -579,6 +597,19 @@ void XrApp::pollEvents() {
                 LOGW("Passthrough state changed: flags 0x%" PRIx64,
                      static_cast<uint64_t>(reinterpret_cast<XrEventDataPassthroughStateChangedFB*>(&event)->flags));
                 break;
+            case XR_TYPE_EVENT_DATA_BOUNDARY_VISIBILITY_CHANGED_META: {
+                const bool suppressed =
+                    reinterpret_cast<XrEventDataBoundaryVisibilityChangedMETA*>(&event)->boundaryVisibility ==
+                    XR_BOUNDARY_VISIBILITY_SUPPRESSED_META;
+                LOGI("Boundary visibility changed: %s (passthrough opacity %.2f)",
+                     suppressed ? "suppressed (hidden)" : "NOT suppressed (shown)", appliedOpacity_);
+                if (boundary_.onVisibilityChanged(suppressed, appliedOpacity_)) {
+                    LOGW("Boundary shown again while the passthrough was at %.2f opacity: dim capped at %.0f %% "
+                         "opacity loss so it can stay hidden",
+                         appliedOpacity_, 100.0f * (1.0f - BoundarySuppression::kOpacityFloor));
+                }
+                break;
+            }
             default:
                 LOGI("Unhandled OpenXR event type %d", event.type);
                 break;
@@ -628,6 +659,7 @@ void XrApp::updateVisibility() {
     LOGI("Content %s", visible ? "visible: starting screen source" : "hidden: stopping screen source");
     statusDrawn_ = false;  // redraw the status panel once visible again
     if (visible) {
+        boundary_.onVisible();  // hide the boundary again once passthrough is on screen
         // No picture yet after a resume: show the room at once, fade the dim back with the picture.
         dimmer_.reset();
         setPassthroughOpacity(1.0f);
@@ -1089,7 +1121,9 @@ void XrApp::applyScreenCommands() {
 }
 
 void XrApp::setPassthroughOpacity(float opacity) {
-    opacity = std::clamp(opacity, 0.0f, 1.0f);
+    // The runtime only keeps the boundary hidden while passthrough counts as rendered: never go
+    // below the floor it made us adopt (BoundarySuppression; 0 unless it objected).
+    opacity = std::clamp(opacity, boundary_.opacityFloor(), 1.0f);
     // Skip imperceptible changes, but always land exactly on 0 and 1.
     if (passthroughLayer_ == XR_NULL_HANDLE ||
         (std::fabs(opacity - appliedOpacity_) < 0.002f && opacity != 0.0f && opacity != 1.0f) ||
@@ -1392,6 +1426,21 @@ void XrApp::renderFrame() {
     endInfo.layers = layers;
     r = xrEndFrame(session_, &endInfo);
     if (XR_FAILED(r)) LOGE("xrEndFrame (%u layers): %s", layerCount, resultString(r).c_str());
+
+    // Hide the Guardian boundary once passthrough is actually on screen (the runtime refuses
+    // before), and again whenever it comes back (BoundarySuppression decides when).
+    const bool passthroughSubmitted = XR_SUCCEEDED(r) && layerCount > 0;
+    if (hasBoundaryVisibility_ &&
+        boundary_.shouldRequest(static_cast<double>(frameState.predictedDisplayTime) / 1e9, passthroughSubmitted)) {
+        const XrResult b = pfnRequestBoundaryVisibilityMETA(session_, XR_BOUNDARY_VISIBILITY_SUPPRESSED_META);
+        const bool notAllowed = b == XR_BOUNDARY_VISIBILITY_SUPPRESSION_NOT_ALLOWED_META;
+        LOGI("xrRequestBoundaryVisibilityMETA(SUPPRESSED): %s (passthrough opacity %.2f)", resultString(b).c_str(),
+             appliedOpacity_);
+        if (boundary_.onRequestResult(b == XR_SUCCESS, notAllowed, appliedOpacity_)) {
+            LOGW("Boundary suppression refused at %.2f passthrough opacity: dim capped at %.0f %% opacity loss",
+                 appliedOpacity_, 100.0f * (1.0f - BoundarySuppression::kOpacityFloor));
+        }
+    }
 
     if (picture && showQuad && framesWithPicture_++ == 0) {
         LOGI("First frame submitted with passthrough + screen layers");
