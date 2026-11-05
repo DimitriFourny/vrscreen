@@ -74,6 +74,7 @@ Stop either with Ctrl-C.
 | `--no-mouse`               | off     | Do not use ⌃⌥⌘ + mouse (orbit) / scroll (zoom)               |
 | `--no-menu`                | off     | No menu-bar icon                                             |
 | `--no-audio`               | off     | Never capture or send audio, whatever the menu says          |
+| `--audio-source auto\|tap\|sck` | auto | System audio from the Core Audio process tap or ScreenCaptureKit; `auto` = tap, else ScreenCaptureKit (see [Audio](#audio)) |
 | `--settings PATH`          | standard | Settings file to read/write instead of `~/Library/Application Support/VRScreen/settings.json` (e.g. a second sender for testing) |
 | `--adb-serial S`           | none    | Headset on USB for the menu's travel-mode items (`scripts/mirror.sh` passes it) |
 | `--mouse-sensitivity DEG`  | 0.1     | Orbit degrees per point of mouse movement                    |
@@ -82,10 +83,10 @@ Stop either with Ctrl-C.
 
 Once per second it logs capture fps, encoded fps (and keyframes), captures skipped by
 backpressure, the bitrate actually sent, audio chunks queued per second, dropped as too
-late, and how late ScreenCaptureKit delivered its audio buffers (`SCK delivery p50/max`,
-after each buffer's last sample; or `audio off`), and the client with its unsent backlog
-and, for clients that send FRAME_ACK, frames in flight (current/limit and the per-second
-max).
+late, and how late the audio source delivered its buffers (`tap delivery` or `SCK
+delivery p50/max`, after each buffer's last sample; or `audio off`), and the client
+with its unsent backlog and, for clients that send FRAME_ACK, frames in flight
+(current/limit and the per-second max).
 
 ### Viewer options
 
@@ -169,35 +170,62 @@ default). The stored values apply even with `--no-menu`.
 ## Audio
 
 With **Audio in headset** on (the default), the sender captures the Mac's system audio
-with the same ScreenCaptureKit stream as the screen (48 kHz stereo, its own process
-excluded), converts it to signed 16-bit little-endian PCM, re-chunks it into 10 ms
-pieces (480 frames) stamped with ScreenCaptureKit's capture time, and sends AUDIO_CONFIG
-and AUDIO messages to the connected client (protocol: [AUDIO](../docs/protocol.md)). Audio
-runs on its own queue and is not part of the frame windows; chunks that would leave the
-sender more than 150 ms after capture are dropped. About 1.55 Mbit/s. Switching the
-checkbox off stops the capture (`capturesAudio` off) and the sending at once; the
-headset drains what it has to silence. `--no-audio` forces it off and greys out both
-audio items. It needs no extra permission: Screen & System Audio Recording covers it,
-and no microphone is used. With `--source test`, the audio is synthesized: silence, plus
-a 60 ms 1 kHz beep (−10.5 dBFS) starting at exactly the capture time of the pattern's
-once-per-second white flash, for A/V sync checks.
+(48 kHz stereo, its own process excluded), converts it to signed 16-bit little-endian
+PCM, re-chunks it into 10 ms pieces (480 frames) and sends AUDIO_CONFIG and AUDIO
+messages to the connected client (protocol: [AUDIO](../docs/protocol.md)). About
+1.55 Mbit/s. Audio runs on its own queue and is not part of the frame windows; chunks
+more than 150 ms late are dropped. Switching the checkbox off stops the capture and the
+sending at once; the headset drains what it has to silence. `--no-audio` forces it off
+and greys out both audio items. No microphone is used.
+
+**Source** (`--audio-source`, default `auto`):
+
+- `tap`: a Core Audio **process tap** (macOS 14.2+), a private global tap of every
+  process but the sender, read in 5 ms buffers. A chunk leaves ~10 ms after its first
+  sample, i.e. as soon as it is complete. Needs the System Audio Recording permission
+  (see below). `--audio-source tap` exits if the tap cannot be created.
+- `sck`: the ScreenCaptureKit stream's own audio. Covered by Screen Recording, but it
+  hands over 20 ms buffers 15–50 ms after their last sample, so chunks leave 30–70 ms
+  after capture.
+- `auto`: the tap, else (older macOS, permission denied, an error) ScreenCaptureKit,
+  logged once as `audio: process tap unavailable (reason), using ScreenCaptureKit`.
+
+Measured on loopback with the 4K screen captured and a video playing, 60 s each,
+arrival − capture of each chunk's first sample: tap p50 10.2 ms, p95 10.5 ms, max 14 ms;
+ScreenCaptureKit p50 29 ms, p95 43 ms, max 50 ms in that session (49/65/70 ms in another).
+
+**Timestamps** are the time the Mac would play the sound: capture time plus the default
+output device's presentation latency, followed when the output changes (logged: `audio:
+Mac output "AirPods" plays 160.0 ms after capture`). Video players send audio that far
+ahead of their picture (160 ms for AirPods, 6 ms for the Mac mini's speakers), so this
+keeps the headset's sound in sync with the mirrored picture. Chunks can therefore arrive
+before their timestamp.
+
+With `--source test`, the audio is synthesized: silence, plus a 60 ms 1 kHz beep
+(−10.5 dBFS) starting at exactly the capture time of the pattern's once-per-second white
+flash, for A/V sync checks.
 
 **Mac volume and mute do not affect the capture.** Measured: `afplay
 /System/Library/Sounds/Ping.aiff` captured through ScreenCaptureKit peaked at the same
 0.297 (−10.5 dBFS) with the Mac at volume 38, muted, and at volume 10. So the Mac's own
 speakers can be silenced while the headset keeps the sound:
 
-**Mute Mac while mirroring** (default off) mutes the default output device while audio
-is actually going to a headset (audio on and a client connected), and unmutes it when
-that stops: checkbox off, Audio in headset off, headset disconnected, or the sender
-exiting. It only mutes a device that was not already muted, and only unmutes the device
-it muted, so a Mac you had muted stays muted. If the default output changes while it is
-engaged, the previous device is restored and the new one muted. The unmute runs on every
-exit path: Quit, Ctrl-C, SIGTERM, SIGHUP, normal exit (atexit) and crash signals
-(SIGSEGV, SIGBUS, SIGILL, SIGABRT, SIGFPE, SIGTRAP), like the cursor freeze. Only
-`kill -9` (or a power loss) can leave the Mac muted; unmute it with the volume keys.
-Devices without a settable mute (some HDMI/DisplayPort outputs) are left playing, and
-the log says so.
+**Mute Mac while mirroring** (default off) silences the Mac while audio is actually going
+to a headset (audio on and a client connected), and stops when that stops: checkbox off,
+Audio in headset off, headset disconnected, or the sender exiting.
+
+- With the process tap, it uses the tap's own mute (`mutedWhenTapped`): the tapped
+  audio is not played on the Mac's outputs while the tap is read. No system setting
+  changes, so there is nothing to restore: macOS ends it with the tap, also on a crash or
+  `kill -9`.
+- With ScreenCaptureKit audio, it mutes the default output device instead. It only
+  mutes a device that was not already muted, and only unmutes the device it muted, so a
+  Mac you had muted stays muted. If the default output changes while it is engaged, the
+  previous device is restored and the new one muted. The unmute runs on every exit path:
+  Quit, Ctrl-C, SIGTERM, SIGHUP, normal exit (atexit) and crash signals (SIGSEGV, SIGBUS,
+  SIGILL, SIGABRT, SIGFPE, SIGTRAP), like the cursor freeze. Only `kill -9` (or a power
+  loss) can leave the Mac muted; unmute it with the volume keys. Devices without a
+  settable mute (some HDMI/DisplayPort outputs) are left playing, and the log says so.
 
 ## Placing the screen: shortcuts and mouse
 
@@ -259,8 +287,7 @@ macOS grants Screen Recording to the app that launches the sender (Terminal, iTe
 your IDE...), not to the binary. If capture fails with a permission error or no
 displays:
 
-1. System Settings → Privacy & Security → Screen & System Audio Recording (this one
-   permission covers the system audio too).
+1. System Settings → Privacy & Security → Screen & System Audio Recording.
 2. Enable the terminal app you run the sender from.
 3. Quit and restart that terminal app.
 
@@ -268,6 +295,16 @@ Recent macOS versions also periodically show a prompt asking whether that app ma
 capturing the screen while bypassing the system's private window picker. That
 decision is yours; capture keeps working while the prompt is open. `--source test`
 needs no permission at all.
+
+**System Audio Recording** (for the process-tap audio source) is a separate permission,
+also granted to the terminal app (its Info.plist must have `NSAudioCaptureUsageDescription`;
+Terminal and Tern do; the sender binary needs none). macOS asks once, the first time the
+sender starts the tap ("… would like to access your system's audio"); the start waits
+for the answer (the video keeps running). The app then appears under Screen & System
+Audio Recording → System Audio Recording Only. The sender checks the permission with
+TCC's read-only preflight before creating the tap: if it was denied, it logs `audio:
+process tap unavailable (System Audio Recording permission denied …), using
+ScreenCaptureKit` and uses ScreenCaptureKit audio (covered by Screen Recording).
 
 ## Using it with the Quest
 
@@ -335,13 +372,18 @@ about 550 Mbit/s through the USB tunnel.
 - **Encoding thread**: the low-latency encoder encodes synchronously inside
   `VTCompressionSessionEncodeFrame` (~15 ms at 4K on an M-series Mac), so it runs on its
   own queue, one frame at a time, and does not delay networking or PONGs.
-- **Audio path**: ScreenCaptureKit delivers Float32 planar buffers of 960 frames (20 ms),
-  also during silence, 30–50 ms after the buffer's last sample (about 10 ms during the
-  first second, then it settles; measured the same with and without 4K video in the
-  stream, and with no video output at all). The sender adds under 1 ms: on loopback a
-  chunk's first sample is p50 ≈ 49 ms, p95 ≈ 65 ms old on arrival. A re-chunker converts
-  the buffers to s16le and cuts 10 ms chunks whose timestamps follow the capture clock
-  (a buffer more than 5 ms off the expected time is a discontinuity: the partial chunk
-  is dropped and timing restarts). Queued AUDIO older than 150 ms is removed from the
-  client's send queue before it reaches the socket; audio already in the kernel buffer
-  cannot be recalled. AUDIO overtakes FRAMEs still waiting unstarted in the send queue.
+- **Audio path**: the process tap is read through a private aggregate device that
+  contains only the tap, in 240-frame (5 ms) IO buffers (any size from 15 to 960 frames
+  is accepted). The aggregate deliberately has no output device: with the default output
+  as its clock device, the tap's input is aligned to that device's latency and arrives
+  141 ms later than ScreenCaptureKit's with AirPods (measured by cross-correlating the
+  two captures of the same audio); without one, its timestamps match ScreenCaptureKit's
+  to the millisecond and the data comes ~13 ms earlier. ScreenCaptureKit (fallback)
+  delivers Float32 planar 20 ms buffers 15–50 ms after their last sample, the level set
+  per capture session (measured the same with and without 4K video in the stream). A
+  re-chunker converts to s16le and cuts 10 ms chunks whose timestamps follow the
+  capture clock (a buffer more than 5 ms off the expected time is a discontinuity: the
+  partial chunk is dropped and timing restarts), then adds the output's presentation
+  latency. Queued AUDIO more than 150 ms past its timestamp is removed from the client's
+  send queue before it reaches the socket; audio already in the kernel buffer cannot be
+  recalled. AUDIO overtakes FRAMEs still waiting unstarted in the send queue.

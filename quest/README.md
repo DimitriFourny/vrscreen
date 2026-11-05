@@ -114,35 +114,47 @@ The Mac's sound plays in the headset (protocol `AUDIO_CONFIG` / `AUDIO`: 48 kHz 
 10 ms chunks stamped with their capture time; the Mac's menu turns it on or off). The headset's
 volume buttons control it like any media.
 
-- **Output**: AAudio, low-latency performance mode, shared, s16 at the stream's rate and channel
-  count (48 kHz stereo), media usage, a device buffer of two bursts. It opens on `AUDIO_CONFIG`
-  (reopened if the format changes) and closes when the connection ends or the app is not visible
-  (headset off, another app in front; it keeps playing behind the Meta menu, like the picture), and
-  every connection starts with an empty buffer. A device change (e.g. Bluetooth headphones)
-  reopens it. If the device refused the source rate the playout resamples linearly (logged as
-  "source rate refused").
+- **Output**: AAudio, low-latency performance mode, s16 at the stream's rate and channel count
+  (48 kHz stereo), media usage. It asks for an *exclusive* stream (MMAP straight to the device, no
+  system mixer: the lowest latency) and falls back to *shared* if the system refuses or grants
+  shared instead; the log says which (`Audio output started: ... exclusive (asked exclusive) ...`).
+  The device buffer starts at 1 burst (exclusive) or 2 (shared) and grows by a burst each time
+  the device reports xruns, up to 4. It opens on `AUDIO_CONFIG` (reopened if the format changes)
+  and closes when the connection ends or the app is not visible (headset off, another app in
+  front; it keeps playing behind the Meta menu, like the picture), and every connection starts
+  with an empty buffer. A device change (e.g. Bluetooth headphones) reopens it. If the device
+  refused the source rate the playout resamples linearly (logged as "source rate refused").
+  A/B switches: `adb shell setprop debug.vrscreen.audioshare shared` (force shared) and
+  `debug.vrscreen.audiobursts 1..8` (starting buffer), read when the stream opens (reconnect).
 - **Timing** (`audio_playout.{h,cpp}`): every sample is played at its capture time (mapped to the
-  headset clock with the PING clock offset) plus a target delay, so the sound stays in step with
-  the picture. The target is the largest of 40 ms, the video's capture→display delay (its
-  capture→decoded average + 14 ms for the compositor) and the worst arrival delay of the last 8 s
-  + the device lead + 5 ms, capped at 150 ms. The *device lead* is measured in every callback: a
-  callback runs well before its frames are heard (time until heard + the callback's own length),
-  and the data must already be there then. During the first 8 s of a stream the target is at
-  least 90 ms: macOS ScreenCaptureKit delivers audio early during the first second, then 31–48 ms
-  after each 20 ms buffer ends in a 4 s sawtooth (up to ~70 ms after capture under 4K load), so
-  a target computed from the first second would be too low. The target rises at once when the link
-  gets worse and comes back down 8 s after. Underruns within 3 s of each other (the arrival delay
+  headset clock with the PING clock offset) plus a target delay. The target is the larger of the
+  video's capture→display delay (its capture→decoded average + 14 ms for the compositor: the sound
+  is never ahead of the picture) and the worst arrival delay of the last 8 s + the device lead +
+  5 ms, capped at 150 ms. The *device lead* is measured in every callback: a callback runs before
+  its frames are heard (time until heard + the callback's own length), and the data must already
+  be there then. During the first 4 s of a stream, while the arrival window is still learning,
+  the target is at least the device lead + 30 ms. The target rises at once when the link gets
+  worse and comes back down 8 s after. Underruns within 3 s of each other (the arrival delay
   keeps growing) add 20 ms each, which fades away at 2 ms/s after 5 s without one: it re-syncs
-  with more headroom a few times instead of crackling.
+  with more headroom a few times instead of crackling. (With a ScreenCaptureKit sender, whose
+  audio arrives early during the first second and then up to ~70 ms late in a 4 s sawtooth, that
+  means a few re-syncs during the first ~6 s.)
 - **Clock**: the AAudio callback knows when its frames will be heard (`AAudioStream_getTimestamp`,
-  refreshed every 50 ms from the network thread). If what plays is more than 5 ms off its due
-  time, the playout speeds up or slows down by a tiny resampling ratio (error × 0.25/s, at most 2 %)
-  until it is within 1 ms: clock drift between the Mac and the headset is absorbed without
-  clicks. More than 200 ms off: it fades out and jumps.
+  refreshed every 50 ms from the network thread). If what plays is more than 5 ms later (or 2 ms
+  earlier) than due, the playout speeds up or slows down by a tiny resampling ratio (error ×
+  0.25/s, at most 2 %) until it is within 1 ms: clock drift between the Mac and the headset and
+  target changes are absorbed without clicks. More than 200 ms off: it fades out and jumps.
 - **Gaps**: a hole in the capture times (the sender drops audio that would be more than 150 ms
   late, or audio was paused) is filled with silence at its place. If the buffer runs dry first
   (underrun) it fades out, plays silence and re-starts at the right spot as soon as audio is back.
   Chunks that arrive after their playout time are counted as late and skipped.
+- **Playback-time stamps**: the Mac's tap sender stamps each chunk with when the Mac itself would
+  play it (capture + the Mac output's latency: ~6 ms for its speakers, ~160 ms for AirPods), so
+  with AirPods chunks arrive ~150 ms *before* their timestamp. They simply wait in the buffer
+  (1.3 s of room); the arrival term of the target is then negative and the video delay sets it.
+  When the Mac's output changes mid-stream the stamps step: back (to a faster output) → the
+  overlapping audio is skipped and what follows plays at its new time; forward → that much
+  silence is inserted. Neither needs a re-sync or causes underruns.
 
 Once per second, while audio is on:
 

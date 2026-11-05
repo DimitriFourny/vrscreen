@@ -273,25 +273,33 @@ One chunk of audio.
   1.55 Mbit/s per second. Clients must accept any chunk length that is a whole number of
   frames (including 0).
 - **Clock:** `captureTimeMicros` is on the same sender clock as FRAME `captureTimeMicros`
-  (see "Clocks"), so audio and video are synchronized by comparing the two: a sample and
-  a picture with the same capture time were captured at the same moment. For screen
-  capture it is ScreenCaptureKit's presentation time of the audio buffer; for the test
-  pattern, the synthesized time.
-- **Audio arrives later than video.** ScreenCaptureKit hands over system audio in 20 ms
-  buffers 30–50 ms after a buffer's last sample (only ~10 ms during the first second or
-  two of a capture, then it settles higher), so a chunk's first sample is typically
-  40–70 ms old when it leaves the sender, versus ~20 ms capture-to-decoded for 4K video.
-  Measured on the Mac loopback over 60 s: arrival − `captureTimeMicros` p50 ≈ 49 ms,
-  p95 ≈ 65 ms, max ≈ 70 ms, stable. Size jitter buffers for that plus the transport,
-  over a window of several seconds (not from the first second), and delay video if A/V
-  sync matters more than video latency.
+  (see "Clocks"), so audio and video are synchronized by comparing the two. For captured
+  system audio it is the time **the Mac would play** the first sample: capture time plus
+  the presentation latency of the Mac's default output device (device + safety offset +
+  stream latency; e.g. 6 ms for built-in speakers, 160 ms for AirPods). Video players send
+  audio that much ahead of the matching picture, so this keeps sound and picture in sync
+  whatever the Mac's output. For the test pattern it is the synthesized time (no offset).
+- **Arrival vs `captureTimeMicros`.** Because of that offset, a chunk can arrive *before*
+  its `captureTimeMicros` (by up to ~150 ms with Bluetooth output on the Mac): clients
+  must buffer early chunks until their time, not treat them as an error. How fresh the
+  audio is, measured on the Mac loopback under 4K load over 60 s, without the offset:
+  - process tap (the default on macOS 14.2+): a chunk leaves the sender ~10 ms after its
+    first sample (p50 10.2 ms, p95 10.5 ms, max 14 ms), i.e. as soon as its 10 ms are
+    complete; video capture-to-decoded is ~21 ms;
+  - ScreenCaptureKit audio (fallback): 20 ms buffers handed over 15–50 ms after their
+    last sample, depending on the capture session (lower during its first second or
+    two), so p50 ≈ 30–50 ms, p95 ≈ 45–65 ms, max ≈ 50–70 ms.
+  Size jitter buffers from a window of several seconds, not from the first second.
 - **Continuity:** consecutive chunks normally follow each other exactly (next
   `captureTimeMicros` = previous + frames × 10^6 / sampleRate, within ±1 µs of
   rounding; the sender follows the capture clock, so small adjustments of up to a few
   ms can occur). A larger step forward is a gap: chunks were dropped (see below),
-  capture paused, or audio was switched off and on again. Audio can also simply stop
-  (switched off on the Mac) without any message. Clients play silence in gaps (or let
-  their buffer drain to silence) and re-align on the timestamps; they must not stall.
+  capture paused, or audio was switched off and on again. When the Mac's default output
+  device changes, the playback-time offset changes with it, so timestamps step forward
+  or back by the latency difference (e.g. −154 ms from AirPods to built-in speakers).
+  Audio can also simply stop (switched off on the Mac) without any message. Clients play
+  silence in gaps (or let their buffer drain to silence) and re-align on the timestamps;
+  they must not stall.
 - **Not part of flow control:** AUDIO does not count as a FRAME, is never acknowledged
   and does not take room in the frame windows. It shares the socket with FRAMEs: the
   sender puts each AUDIO ahead of FRAMEs that are queued but not yet started on the
@@ -346,9 +354,10 @@ after a CONFIG). It starts at 0 for every connection and wraps around at 2^32.
 `captureTimeMicros` and `serverTimeMicros` are on the **sender clock**: the macOS host
 time clock (`mach_absolute_time`, as used by CoreMedia), in microseconds. It is
 monotonic and unrelated to wall time. For screen capture it is the presentation time
-ScreenCaptureKit assigned to the captured image (FRAME) or audio buffer (AUDIO); for the
-test pattern, the moment the pattern was rendered (FRAME) or the synthesized sample time
-(AUDIO). FRAME and AUDIO timestamps are therefore directly comparable for A/V sync.
+ScreenCaptureKit assigned to the captured image (FRAME), and for system audio the time
+the Mac would play it (AUDIO, see there); for the test pattern, the moment the pattern
+was rendered (FRAME) or the synthesized sample time (AUDIO). FRAME and AUDIO timestamps
+are therefore directly comparable for A/V sync.
 
 The client uses any monotonic clock of its own (Android: `CLOCK_MONOTONIC`) for
 `clientTimeMicros`. To estimate the offset between the two clocks:

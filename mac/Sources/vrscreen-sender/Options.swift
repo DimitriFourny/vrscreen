@@ -3,6 +3,8 @@ import MirrorProtocol
 
 struct SenderOptions {
     enum Source: String { case screen, test }
+    /// Where screen-mode audio comes from: `auto` tries the process tap, then ScreenCaptureKit.
+    enum AudioSource: String { case auto, tap, sck }
 
     var source: Source = .screen
     var displayIndex: Int?
@@ -24,6 +26,7 @@ struct SenderOptions {
     var audio = true
     /// --settings: settings file instead of the standard one.
     var settingsPath: String?
+    var audioSource: AudioSource = .auto
     /// Headset on USB for the menu's travel-mode items (scripts/mirror.sh passes it).
     var adbSerial: String?
     /// Degrees of ORBIT per point of mouse movement.
@@ -58,6 +61,11 @@ struct SenderOptions {
       --no-menu                No menu-bar icon (curvature, dimming, audio, re-center, quit).
       --no-audio               Never capture or send audio (overrides the menu's
                                "Audio in headset").
+      --audio-source auto|tap|sck
+                               System audio source with --source screen (default auto):
+                               the Core Audio process tap (~5 ms, needs System Audio
+                               Recording permission, macOS 14.2+), falling back to
+                               ScreenCaptureKit audio (15-50 ms later).
       --settings PATH          Settings file to read and write (default
                                ~/Library/Application Support/VRScreen/settings.json),
                                e.g. for a second sender used for testing.
@@ -124,6 +132,10 @@ struct SenderOptions {
             case "--no-menu": o.menu = false
             case "--no-audio": o.audio = false
             case "--settings": o.settingsPath = try value(arg)
+            case "--audio-source":
+                let s = try value(arg)
+                guard let source = AudioSource(rawValue: s) else { throw OptionError("--audio-source must be auto, tap or sck") }
+                o.audioSource = source
             case "--adb-serial": o.adbSerial = try value(arg)
             case "--mouse-sensitivity": o.mouseDegreesPerPoint = try double(arg)
             case "--scroll-sensitivity": o.scrollSensitivity = try double(arg)

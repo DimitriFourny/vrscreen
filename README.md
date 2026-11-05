@@ -75,8 +75,9 @@ same capture clock as the frames; it never waits for the video window, and chunk
 3. **Connect the headset** with a USB-C data cable, accept "Allow USB debugging" inside the
    headset, and check that `adb devices` lists it as `device`.
 4. **First run installs the app:** `scripts/mirror.sh --install`. macOS asks once to allow your
-   terminal app to record the screen (System Settings → Privacy & Security → Screen & System
-   Audio Recording).
+   terminal app to record the screen, and once to let it record the system audio (System
+   Settings → Privacy & Security → Screen & System Audio Recording). Without the audio
+   permission the sound still works, about 20–40 ms later (ScreenCaptureKit audio).
 
 ## Usage
 

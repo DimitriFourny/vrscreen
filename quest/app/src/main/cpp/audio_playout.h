@@ -2,6 +2,7 @@
 
 #include <atomic>
 #include <cstdint>
+#include <limits>
 #include <vector>
 
 namespace qm {
@@ -34,20 +35,21 @@ struct AudioPlayoutStats {
 // a hole in the capture times is filled with silence; duplicates are dropped.
 //
 // Playout: frame i is meant to be heard at localCapture(i) + targetDelay. The target is the larger
-// of minDelay (40 ms), the video's capture->display delay (setVideoDelay) and the worst arrival
-// delay of the last 8 s plus the device lead (how far ahead of being heard a callback must have
-// its frames: measured in render()) plus 5 ms; during the first 8 s of a stream, before the
-// window has seen a full cycle of the source's behaviour (macOS ScreenCaptureKit delivers audio
-// early at first, then 31-48 ms late in a 4 s sawtooth), at least startupDelay (90 ms).
-// Repeated underruns (within 3 s of each other: the arrival delay keeps growing) add 20 ms each
-// on top, which fades 2 ms/s after 5 s without one. At most maxDelay (150 ms). render() gets the
-// time its first frame will be heard (from
+// of minDelay (none by default), the video's capture->display delay (setVideoDelay: audio never
+// ahead of the picture) and the worst arrival delay of the last 8 s plus the device lead (how far
+// ahead of being heard a callback must have its frames: measured in render()) plus 5 ms. During
+// the first 4 s of a stream, while the window is still learning, at least the device lead +
+// 30 ms. Repeated underruns (within 3 s of each other: the arrival delay keeps growing) add 20 ms
+// each on top, which fades 2 ms/s after 5 s without one. At most maxDelay (150 ms). The producer
+// publishes the arrival statistics; render() combines them with the lead it measures, so a new
+// lead counts at once. render() gets the time its first frame will be heard (from
 // AAudioStream_getTimestamp) and the current time, and:
 // - waiting (start, after an underrun or a jump): silence until the frame due now has arrived,
 //   then starts exactly there (at the current, possibly larger, target) with a short fade-in;
-// - playing: compares when the current frame will be heard with when it is due. Beyond 5 ms
-//   (smoothed) it resamples by a tiny ratio (0.25 x the error per second, at most 2 %) until the
-//   error is under 1 ms: inaudible drift correction, no clicks. Beyond 200 ms it fades out and
+// - playing: compares when the current frame will be heard with when it is due. Beyond 5 ms late
+//   or 2 ms early (smoothed; early eats into the safety margin) it resamples by a tiny ratio
+//   (0.25 x the error per second, at most 2 %) until the error is under 1 ms: inaudible drift
+//   correction, no clicks. Beyond 200 ms it fades out and
 //   re-syncs (jump). Running out of data fades out, plays silence and re-syncs.
 // Linear interpolation also covers a device that refused the source rate (outputRate differs).
 class AudioPlayout {
@@ -56,7 +58,7 @@ public:
     static constexpr int64_t kCapacityFrames = 1 << 16;  // 1.37 s at 48 kHz
 
     struct Config {
-        int64_t minDelayMicros = 40'000;
+        int64_t minDelayMicros = 0;
         int64_t maxDelayMicros = 150'000;
         int64_t safetyMicros = 5'000;       // over the worst arrival delay + the device lead
         int64_t underrunBoostMicros = 20'000;  // per repeated underrun
@@ -64,7 +66,8 @@ public:
         double boostHoldSeconds = 5.0;      // without underruns before the boost fades
         int64_t boostDecayPerSecond = 2'000;
         int64_t jumpMicros = 200'000;
-        int64_t correctStartMicros = 5'000;
+        int64_t correctStartMicros = 5'000;       // playing later than due by this: correct
+        int64_t correctEarlyStartMicros = 2'000;  // playing earlier than due by this: correct
         int64_t correctStopMicros = 1'000;
         double gainPerSecond = 0.25;        // resample ratio per second of error
         double maxRatio = 0.02;
@@ -72,8 +75,8 @@ public:
         int64_t gapToleranceMicros = 5'000;  // timestamp jitter still counted as contiguous
         int fadeFrames = 96;                 // 2 ms at 48 kHz
         int64_t jitterBucketMicros = 250'000;  // arrival-delay window: 32 buckets = 8 s
-        int64_t startupDelayMicros = 90'000;   // floor while the window fills (0: none)
-        int64_t startupMicros = 8'000'000;
+        int64_t startupMarginMicros = 30'000;  // floor = device lead + this while the window learns
+        int64_t startupMicros = 4'000'000;
     };
 
     AudioPlayout() : AudioPlayout(Config{}) {}
@@ -112,7 +115,7 @@ private:
     bool readAnchor(Anchor* out) const;
     void writeFrames(int64_t at, const void* samples, int frames);
     void writeSilence(int64_t at, int64_t frames);
-    void updateTarget(int64_t captureMicros, int64_t arrivalMicros);
+    void updateArrivals(int64_t captureMicros, int64_t arrivalMicros);
 
     const Config config_;
     int sampleRate_ = 48000;
@@ -129,9 +132,12 @@ private:
     std::atomic<bool> haveAnchor_{false};
     std::atomic<bool> offsetValid_{false};
     std::atomic<int64_t> offset_{0};
-    std::atomic<int64_t> targetDelay_{0};      // from arrivals (producer)
-    std::atomic<int64_t> effectiveTarget_{0};  // + underrun boost (consumer)
-    std::atomic<int64_t> lead_{0};             // device lead measured by the consumer
+    // Published by the producer, combined with the lead and boost by the consumer.
+    std::atomic<int64_t> worstArrival_{std::numeric_limits<int64_t>::min()};  // window's worst; min = none yet
+    std::atomic<int64_t> floorDelay_{0};      // max(minDelay, video delay)
+    std::atomic<bool> startup_{true};         // still within startupMicros of the first arrival
+    std::atomic<int64_t> effectiveTarget_{0};  // the consumer's target (stats)
+    std::atomic<int64_t> lead_{0};             // device lead measured by the consumer (stats)
     std::atomic<int64_t> playhead_{-1};    // next index the consumer plays (late detection)
 
     // Producer only.

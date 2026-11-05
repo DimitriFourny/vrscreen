@@ -10,11 +10,12 @@
 
 namespace qm {
 
-// AAudio output for the Mac's audio: a low-latency, shared, s16 stream at the source's rate and
-// channel count whose data callback pulls from an AudioPlayout. The callback learns when its
-// frames will be heard from AAudioStream_getTimestamp, which the owner's thread refreshes
-// (service()) and publishes to it; the callback itself makes no system calls and takes no locks.
-// Uses the media volume (the headset's volume buttons work as usual).
+// AAudio output for the Mac's audio: a low-latency s16 stream at the source's rate and channel
+// count, exclusive (MMAP, no mixer) when the system grants it, else shared; its device buffer
+// starts at 1 burst (exclusive) or 2 (shared) and grows a burst per xrun episode, up to 4. The
+// data callback pulls from an AudioPlayout and learns when its frames will be heard from
+// AAudioStream_getTimestamp, which the owner's thread refreshes (service()) and publishes to it;
+// the callback takes no locks. Uses the media volume (the headset's volume buttons work as usual).
 //
 // open/close/service: one owner thread (the network thread).
 class AudioOutput {
@@ -40,7 +41,10 @@ private:
     static aaudio_data_callback_result_t dataCallback(AAudioStream* stream, void* user, void* audioData,
                                                       int32_t numFrames);
     static void errorCallback(AAudioStream* stream, void* user, aaudio_result_t error);
+    // Exclusive first, shared if refused (debug.vrscreen.audioshare=shared forces shared).
     bool openStream();
+    bool openWith(aaudio_sharing_mode_t sharing);
+    void applyBufferSize();
     void closeStream();
     void refreshTimestamp();
 
@@ -53,7 +57,11 @@ private:
     int64_t lastAttemptMicros_ = 0;
     int64_t lastTimestampMicros_ = 0;
     static constexpr int64_t kRetryMicros = 1'000'000;
-    int32_t lastXRuns_ = 0;
+    int32_t lastXRuns_ = 0;     // for the per-second stats
+    int32_t tunedXRuns_ = 0;    // xruns already answered with a larger buffer
+    bool exclusive_ = false;
+    int32_t burst_ = 0;
+    int bufferBursts_ = 2;
 
     // Callback state.
     int64_t framesWritten_ = 0;

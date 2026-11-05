@@ -39,11 +39,12 @@ double decode(int16_t left, int16_t right, double guess) {
     return low + 30000.0 * std::round((guess - low) / 30000.0);
 }
 
-// Most tests switch the startup floor off to check the steady-state logic from the first second;
-// the source-behaviour tests at the end use the real defaults.
+// Most tests use a fixed 40 ms floor and no startup margin to check the steady-state logic from
+// the first second; the source-behaviour tests at the end use the real defaults.
 AudioPlayout::Config withoutStartupFloor() {
     AudioPlayout::Config c;
-    c.startupDelayMicros = 0;
+    c.minDelayMicros = 40'000;
+    c.startupMarginMicros = 0;
     return c;
 }
 
@@ -55,6 +56,9 @@ struct Sim {
     int64_t localStart = 1'000'000;
     std::function<int64_t(int64_t)> transit = [](int64_t) { return int64_t{5'000}; };  // after the chunk's end
     std::function<bool(int64_t)> sent = [](int64_t) { return true; };
+    // Added to chunk k's capture timestamp: the sender stamps the Mac's playback time (capture +
+    // its output latency, which can change mid-stream); arrival is unaffected.
+    std::function<int64_t(int64_t)> stampShift = [](int64_t) { return int64_t{0}; };
     bool offsetKnown = true;
     int64_t deviceLatency = kDeviceLatency;  // callback -> heard
 
@@ -93,8 +97,8 @@ struct Sim {
                 pcm[2 * i + 1] = rightOf(first + i);
             }
             if (offsetKnown) playout.setClockOffset(offset);
-            playout.push(static_cast<int64_t>(captureLocal(static_cast<double>(first))) + offset, pcm.data(), kChunk,
-                         arrival);
+            playout.push(static_cast<int64_t>(captureLocal(static_cast<double>(first))) + offset + stampShift(chunk),
+                         pcm.data(), kChunk, arrival);
         }
         ++chunk;
     }
@@ -115,7 +119,7 @@ struct Sim {
             const int64_t present = nextCallback() + deviceLatency;
             playout.render(buffer.data(), kBurst, present, nextCallback());
             ++callbacks;
-            const double guess = (present - 95'000 - localStart) * kRate * (1.0 + ppm * 1e-6) / 1e6;
+            const double guess = (present - 95'000 - stampShift(chunk) - localStart) * kRate * (1.0 + ppm * 1e-6) / 1e6;
             heard.push_back({present, decode(buffer[0], buffer[1], guess)});
             for (int i = 0; i < kBurst; ++i) silentFrames += buffer[2 * i] == 0 ? 1 : 0;
         }
@@ -130,7 +134,9 @@ struct Sim {
         for (const Heard& h : heard) {
             const double t = static_cast<double>(h.present - localStart) / 1e6;
             if (t < fromSeconds || t >= toSeconds || h.index < 0) continue;
-            const double ms = (static_cast<double>(h.present) - captureLocal(h.index)) / 1000.0;
+            // Relative to the sample's timestamp (capture + any playback-time shift).
+            const double stamp = captureLocal(h.index) + static_cast<double>(stampShift(static_cast<int64_t>(h.index) / kChunk));
+            const double ms = (static_cast<double>(h.present) - stamp) / 1000.0;
             d.min = std::min(d.min, ms);
             d.max = std::max(d.max, ms);
             ++d.samples;
@@ -381,8 +387,9 @@ TEST(audioGrowingArrivalDelayResyncsInsteadOfCrackling) {
 // What MacAudio measured on the Mac under 4K load: ScreenCaptureKit hands over audio in 20 ms
 // buffers (split into two 10 ms chunks, which arrive together), about 10 ms after the buffer's
 // end during the first second, then 31-48 ms after it in a 4 s sawtooth (arrival - capture of a
-// chunk's first sample: up to ~70 ms). With a 20 ms device lead the playout must not underrun,
-// neither while the delay settles nor after.
+// chunk's first sample: up to ~70 ms). With a 20 ms device lead: the startup floor (lead + 30 ms)
+// is sized for fast sources, so the climb from ~20 ms to the sawtooth's ~70 ms peaks costs a few
+// re-syncs while the window learns (first ~6 s); after that it must play cleanly.
 TEST(audioScreenCaptureKitArrivalPatternPlaysCleanly) {
     Sim sim(AudioPlayout::Config{});
     sim.deviceLatency = 20'000;
@@ -393,16 +400,113 @@ TEST(audioScreenCaptureKitArrivalPatternPlaysCleanly) {
         const int64_t chunkEnd = (k + 1) * 10'000;
         return batchEnd + lateAfterEnd - chunkEnd;  // both chunks of a batch arrive together
     };
-    sim.run(30.0);
+    sim.run(6.0);
+    const AudioPlayoutStats start = sim.playout.takeStats();
+    CHECK_NEAR(start.underruns, 0, 3);
+    sim.run(24.0);
     const AudioPlayoutStats s = sim.playout.takeStats();
     CHECK_NEAR(s.underruns, 0, 0);
     CHECK_NEAR(s.lateChunks, 0, 0);
     CHECK_NEAR(s.resyncs, 0, 0);
-    // Worst arrival 68 ms + 24 ms lead + 5 ms: about 97 ms once the startup floor (90) is over.
+    // Worst arrival 68 ms + 24 ms lead + 5 ms: about 97 ms once the underrun boost has faded.
     CHECK_NEAR(sim.playout.targetDelayMicros(), 97'000, 2'000);
-    const Sim::Delay d = sim.delay(20.0, 30.0);
-    CHECK(d.samples > 2000);
+    const Sim::Delay d = sim.delay(25.0, 30.0);
+    CHECK(d.samples > 1000);
     CHECK(d.min > 90.0 && d.max < 104.0);
+}
+
+// The CoreAudio process tap: chunks arrive 10-20 ms after their end (20-30 ms after their first
+// sample), jittering. With the device lead at 15 ms (exclusive) or 44 ms (shared, as measured),
+// the target starts at lead + 30 ms and settles at about worst arrival + lead + 5 ms: no fixed
+// floor sized for ScreenCaptureKit, no underruns at any point.
+void checkFastArrivals(int64_t leadMicros) {
+    Sim sim(AudioPlayout::Config{});
+    sim.deviceLatency = leadMicros - (kBurst + 2) * 1'000'000LL / kRate;  // lead = latency + callback
+    sim.transit = [](int64_t k) { return int64_t{10'000} + (k * 7919) % 11 * 1'000; };  // 10..20 ms
+    sim.run(20.0);
+    const AudioPlayoutStats s = sim.playout.takeStats();
+    CHECK_NEAR(s.underruns, 0, 0);
+    CHECK_NEAR(s.lateChunks, 0, 0);
+    CHECK_NEAR(s.resyncs, 0, 0);
+    const double expected = (30'000 + leadMicros + 5'000) / 1000.0;  // worst 20 + 10 ms chunk
+    CHECK_NEAR(sim.playout.targetDelayMicros() / 1000.0, expected, 1.0);
+    const Sim::Delay d = sim.delay(8.0, 20.0);  // after the startup floor and the convergence
+    CHECK(d.samples > 1500);
+    CHECK_NEAR(d.min, expected, 2.0);
+    CHECK_NEAR(d.max, expected, 2.0);
+    const Sim::Delay early = sim.delay(0.0, 4.0);  // startup: lead + 30 ms
+    CHECK_NEAR(early.min, (leadMicros + 30'000) / 1000.0, 2.0);
+}
+
+TEST(audioFastArrivalsExclusiveLead) { checkFastArrivals(15'000); }
+TEST(audioFastArrivalsSharedLead) { checkFastArrivals(44'000); }
+
+// The tap sender stamps chunks with the Mac's playback time (capture + its output latency: 160 ms
+// with AirPods) and sends them at once, so they arrive ~140 ms *before* their timestamp. They
+// must simply wait in the buffer: the target is the video's delay (70 ms here), no drops, no
+// re-syncs.
+void playbackStamped(Sim& sim, std::function<int64_t(int64_t)> shift) {
+    sim.deviceLatency = 40'000;  // shared-mode lead ~44 ms
+    sim.playout.setVideoDelay(70'000);
+    sim.transit = [](int64_t) { return int64_t{10'000}; };
+    sim.stampShift = std::move(shift);
+}
+
+TEST(audioEarlyStampedChunksWaitForTheirTime) {
+    Sim sim(AudioPlayout::Config{});
+    playbackStamped(sim, [](int64_t) { return int64_t{160'000}; });
+    sim.run(20.0);
+    const AudioPlayoutStats s = sim.playout.takeStats();
+    CHECK_NEAR(s.underruns, 0, 0);
+    CHECK_NEAR(s.lateChunks, 0, 0);
+    CHECK_NEAR(s.droppedChunks, 0, 0);
+    CHECK_NEAR(s.resyncs, 0, 0);
+    CHECK_NEAR(sim.playout.targetDelayMicros(), 70'000, 0);
+    // Waiting for their time (~140 ms) + the target - the device lead.
+    CHECK_NEAR(s.bufferedMicros / 1000.0, 140.0 + 74.0 - 44.0, 15.0);
+    // Heard 70 ms after their timestamp (+4 ms: the startup floor, lead + 30 = 74 ms, ended;
+    // being up to 5 ms late is inside the correction's dead band).
+    const Sim::Delay d = sim.delay(6.0, 20.0);
+    CHECK(d.samples > 2000);
+    CHECK(d.min >= 69.5 && d.max <= 75.0);
+}
+
+// The user switches the Mac's output from AirPods (160 ms) to its speakers (6 ms) mid-stream: the
+// stamps step 154 ms back. What is buffered plays as planned, the overlapping 154 ms is skipped,
+// and the new audio plays at its (new) time: no underrun, no re-sync.
+TEST(audioMacOutputSwitchToLowerLatency) {
+    Sim sim(AudioPlayout::Config{});
+    playbackStamped(sim, [](int64_t k) { return k < 1000 ? int64_t{160'000} : int64_t{6'000}; });
+    sim.run(10.0);
+    sim.playout.takeStats();
+    sim.run(10.0);
+    const AudioPlayoutStats s = sim.playout.takeStats();
+    CHECK_NEAR(s.underruns, 0, 0);
+    CHECK_NEAR(s.resyncs, 0, 0);
+    CHECK_NEAR(s.droppedChunks, 15, 1);  // 154 ms of 10 ms chunks
+    // At their new time (+ up to 5 ms: the chunk that straddles the step is within the timestamp
+    // tolerance and is appended as is, then the dead band; it converges as the target moves).
+    const Sim::Delay d = sim.delay(10.5, 20.0);
+    CHECK(d.samples > 2000);
+    CHECK(d.min >= 69.5 && d.max <= 79.5);
+}
+
+// And back (6 -> 160 ms): the stamps jump 154 ms forward; that much silence is inserted, the
+// following audio plays at its time.
+TEST(audioMacOutputSwitchToHigherLatency) {
+    Sim sim(AudioPlayout::Config{});
+    playbackStamped(sim, [](int64_t k) { return k < 1000 ? int64_t{6'000} : int64_t{160'000}; });
+    sim.run(10.0);
+    sim.playout.takeStats();
+    sim.run(10.0);
+    const AudioPlayoutStats s = sim.playout.takeStats();
+    CHECK_NEAR(s.underruns, 0, 0);
+    CHECK_NEAR(s.resyncs, 0, 0);
+    CHECK_NEAR(s.gaps, 1, 0);
+    CHECK_NEAR(s.gapMicros / 1000.0, 154.0, 1.0);
+    const Sim::Delay d = sim.delay(10.5, 20.0);
+    CHECK(d.samples > 2000);
+    CHECK(d.min >= 69.5 && d.max <= 75.0);
 }
 
 }  // namespace

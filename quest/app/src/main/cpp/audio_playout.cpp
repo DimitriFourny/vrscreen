@@ -3,12 +3,15 @@
 #include <algorithm>
 #include <cmath>
 #include <cstring>
+#include <limits>
 
 namespace qm {
 namespace {
 
 constexpr int64_t kMask = AudioPlayout::kCapacityFrames - 1;
 constexpr int kBuckets = 32;
+// An empty arrival-delay bucket / no arrival seen yet (arrival delays can be negative).
+constexpr int64_t kEmptyBucket = std::numeric_limits<int64_t>::min();
 
 void atomicMax(std::atomic<int64_t>& a, int64_t v) {
     int64_t cur = a.load(std::memory_order_relaxed);
@@ -32,14 +35,15 @@ void AudioPlayout::reset(int sampleRate, int channels, int outputRate) {
     anchorMicros_.store(0, std::memory_order_relaxed);
     haveAnchor_.store(false, std::memory_order_relaxed);
     playhead_.store(-1, std::memory_order_relaxed);
-    targetDelay_.store(std::max({config_.minDelayMicros, videoDelay_, config_.startupDelayMicros}),
-                       std::memory_order_relaxed);
-    effectiveTarget_.store(targetDelay_.load(std::memory_order_relaxed), std::memory_order_relaxed);
+    worstArrival_.store(kEmptyBucket, std::memory_order_relaxed);
+    floorDelay_.store(std::max(config_.minDelayMicros, videoDelay_), std::memory_order_relaxed);
+    startup_.store(true, std::memory_order_relaxed);
+    effectiveTarget_.store(floorDelay_.load(std::memory_order_relaxed), std::memory_order_relaxed);
     lead_.store(0, std::memory_order_relaxed);
     firstArrival_ = 0;
     bucketStart_ = 0;
     bucket_ = 0;
-    std::fill(std::begin(bucketMax_), std::end(bucketMax_), 0);
+    std::fill(std::begin(bucketMax_), std::end(bucketMax_), kEmptyBucket);
     playing_ = false;
     readIndex_ = 0;
     frac_ = 0.0;
@@ -58,7 +62,10 @@ void AudioPlayout::setClockOffset(int64_t senderMinusLocalMicros) {
     offsetValid_.store(true, std::memory_order_release);
 }
 
-void AudioPlayout::setVideoDelay(int64_t micros) { videoDelay_ = std::max<int64_t>(micros, 0); }
+void AudioPlayout::setVideoDelay(int64_t micros) {
+    videoDelay_ = std::max<int64_t>(micros, 0);
+    floorDelay_.store(std::max(config_.minDelayMicros, videoDelay_), std::memory_order_relaxed);
+}
 
 void AudioPlayout::publishAnchor(int64_t index, int64_t micros) {
     const uint32_t seq = anchorSeq_.load(std::memory_order_relaxed);
@@ -108,37 +115,32 @@ void AudioPlayout::writeSilence(int64_t at, int64_t frames) {
     }
 }
 
-void AudioPlayout::updateTarget(int64_t captureMicros, int64_t arrivalMicros) {
-    int64_t target = std::max(config_.minDelayMicros, videoDelay_);
+void AudioPlayout::updateArrivals(int64_t captureMicros, int64_t arrivalMicros) {
     if (firstArrival_ == 0) firstArrival_ = arrivalMicros;
-    // Until the window has seen a full cycle, assume the usual worst rather than the (often much
-    // better) first second: avoids starting low and underrunning as the arrival delay settles.
-    if (arrivalMicros - firstArrival_ < config_.startupMicros) target = std::max(target, config_.startupDelayMicros);
-    if (offsetValid_.load(std::memory_order_acquire)) {
-        // Arrival delay of this chunk's first sample: capture (local clock) -> received.
-        const int64_t transit = arrivalMicros - (captureMicros - offset_.load(std::memory_order_relaxed));
-        if (bucketStart_ == 0 || arrivalMicros - bucketStart_ >= config_.jitterBucketMicros) {
-            const int64_t steps = bucketStart_ == 0 ? 1 : (arrivalMicros - bucketStart_) / config_.jitterBucketMicros;
-            for (int64_t i = 0; i < std::min<int64_t>(steps, kBuckets); ++i) {
-                bucket_ = (bucket_ + 1) % kBuckets;
-                bucketMax_[bucket_] = 0;
-            }
-            bucketStart_ = arrivalMicros;
+    startup_.store(arrivalMicros - firstArrival_ < config_.startupMicros, std::memory_order_relaxed);
+    if (!offsetValid_.load(std::memory_order_acquire)) return;
+    // Arrival delay of this chunk's first sample: capture (local clock) -> received. Negative when
+    // the sender stamps audio with its own playback time (capture + the Mac's output latency,
+    // e.g. 160 ms with AirPods) and sends it straight away: it waits here until then.
+    const int64_t transit = arrivalMicros - (captureMicros - offset_.load(std::memory_order_relaxed));
+    if (bucketStart_ == 0 || arrivalMicros - bucketStart_ >= config_.jitterBucketMicros) {
+        const int64_t steps = bucketStart_ == 0 ? 1 : (arrivalMicros - bucketStart_) / config_.jitterBucketMicros;
+        for (int64_t i = 0; i < std::min<int64_t>(steps, kBuckets); ++i) {
+            bucket_ = (bucket_ + 1) % kBuckets;
+            bucketMax_[bucket_] = kEmptyBucket;
         }
-        bucketMax_[bucket_] = std::max(bucketMax_[bucket_], transit);
-        const int64_t worst = *std::max_element(std::begin(bucketMax_), std::end(bucketMax_));
-        target = std::max(target, worst + lead_.load(std::memory_order_relaxed) + config_.safetyMicros);
+        bucketStart_ = arrivalMicros;
     }
-    targetDelay_.store(std::min(target, config_.maxDelayMicros), std::memory_order_relaxed);
+    bucketMax_[bucket_] = std::max(bucketMax_[bucket_], transit);
+    worstArrival_.store(*std::max_element(std::begin(bucketMax_), std::end(bucketMax_)), std::memory_order_relaxed);
 }
 
 void AudioPlayout::push(int64_t captureMicros, const void* samples, int frames, int64_t arrivalMicros) {
     if (frames <= 0) return;
     frames = static_cast<int>(std::min<int64_t>(frames, kCapacityFrames / 2));
-    updateTarget(captureMicros, arrivalMicros);
-
+    updateArrivals(captureMicros, arrivalMicros);
+    const auto* bytes = static_cast<const uint8_t*>(samples);
     int64_t w = writeIndex_.load(std::memory_order_relaxed);
-    const int64_t durationMicros = int64_t{frames} * 1'000'000 / sampleRate_;
     Anchor anchor{};
     if (!readAnchor(&anchor)) {
         publishAnchor(w, captureMicros);
@@ -160,11 +162,17 @@ void AudioPlayout::push(int64_t captureMicros, const void* samples, int frames, 
             }
             publishAnchor(w, captureMicros);
         } else if (diff < -config_.gapToleranceMicros) {
-            if (captureMicros + durationMicros <= expected) {
+            // Timestamps stepped back (e.g. the Mac's output switched to one with less latency, so
+            // its playback-time stamps moved earlier) or a duplicate: what is already buffered
+            // plays as planned, the overlapping part of this chunk is skipped, the rest follows on.
+            const int64_t skip = (expected - captureMicros) * sampleRate_ / 1'000'000;
+            if (skip >= frames) {
                 statDropped_.fetch_add(1, std::memory_order_relaxed);  // nothing new in it
                 return;
             }
-            publishAnchor(w, captureMicros);  // timestamps stepped back: follow them
+            bytes += skip * int64_t{channels_} * int64_t{sizeof(int16_t)};
+            frames -= static_cast<int>(skip);
+            publishAnchor(w, expected);
         } else {
             // Contiguous: let this chunk's timestamp pull the anchor gently (timestamp jitter
             // averages out, real clock drift is followed).
@@ -173,7 +181,7 @@ void AudioPlayout::push(int64_t captureMicros, const void* samples, int frames, 
     }
     const int64_t playhead = playhead_.load(std::memory_order_relaxed);
     if (playhead >= 0 && w + frames <= playhead) statLate_.fetch_add(1, std::memory_order_relaxed);
-    writeFrames(w, samples, frames);
+    writeFrames(w, bytes, frames);
     writeIndex_.store(w + frames, std::memory_order_release);
 }
 
@@ -191,7 +199,12 @@ void AudioPlayout::render(int16_t* out, int frames, int64_t presentMicros, int64
     if (boost_ > 0 && sinceUnderrun_ > config_.boostHoldSeconds) {
         boost_ = std::max<int64_t>(0, boost_ - static_cast<int64_t>(config_.boostDecayPerSecond * callbackSeconds));
     }
-    const int64_t target = std::min(targetDelay_.load(std::memory_order_relaxed) + boost_, config_.maxDelayMicros);
+    const int64_t leadNow = static_cast<int64_t>(leadMax_);
+    int64_t target = floorDelay_.load(std::memory_order_relaxed);
+    const int64_t worst = worstArrival_.load(std::memory_order_relaxed);
+    if (worst != kEmptyBucket) target = std::max(target, worst + leadNow + config_.safetyMicros);
+    if (startup_.load(std::memory_order_relaxed)) target = std::max(target, leadNow + config_.startupMarginMicros);
+    target = std::min(target + boost_, config_.maxDelayMicros);
     effectiveTarget_.store(target, std::memory_order_relaxed);
 
     Anchor anchor{};
@@ -239,7 +252,11 @@ void AudioPlayout::render(int16_t* out, int frames, int64_t presentMicros, int64
     const double alpha = std::min(1.0, callbackSeconds / config_.errorSmoothingSeconds);
     errorSmooth_ += alpha * (error - errorSmooth_);
     bool jump = std::fabs(error) > static_cast<double>(config_.jumpMicros);
-    if (!correcting_ && std::fabs(errorSmooth_) > static_cast<double>(config_.correctStartMicros)) {
+    // Playing early eats into the safety margin (risking underruns): correct from 2 ms. Playing
+    // late only costs latency: from 5 ms.
+    const double startThreshold = static_cast<double>(errorSmooth_ < 0 ? config_.correctEarlyStartMicros
+                                                                        : config_.correctStartMicros);
+    if (!correcting_ && std::fabs(errorSmooth_) > startThreshold) {
         correcting_ = true;
         statCorrections_.fetch_add(1, std::memory_order_relaxed);
     } else if (correcting_ && std::fabs(errorSmooth_) < static_cast<double>(config_.correctStopMicros)) {

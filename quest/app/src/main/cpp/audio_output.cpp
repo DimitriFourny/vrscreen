@@ -2,13 +2,27 @@
 
 #include "log.h"
 
+#include <sys/system_properties.h>
+
 #include <cstdio>
+#include <cstdlib>
 #include <ctime>
+#include <string>
 
 namespace qm {
 namespace {
 
 constexpr int64_t kTimestampIntervalMicros = 50'000;
+constexpr int kMaxBufferBursts = 4;
+// A/B switches: "shared" forces the shared mixer path; 1..8 sets the starting buffer in bursts.
+constexpr const char* kShareProperty = "debug.vrscreen.audioshare";
+constexpr const char* kBurstsProperty = "debug.vrscreen.audiobursts";
+
+std::string readProperty(const char* name) {
+    char value[PROP_VALUE_MAX] = {};
+    __system_property_get(name, value);
+    return value;
+}
 
 int64_t monotonicNanos() {
     timespec ts{};
@@ -41,7 +55,15 @@ void AudioOutput::close() {
 
 bool AudioOutput::openStream() {
     lastAttemptMicros_ = monotonicNanos() / 1000;
+    // Exclusive (MMAP straight to the device, no mixer) has the lowest latency; the system may
+    // refuse it (busy, Bluetooth...) or grant shared instead, which openWith() logs.
+    if (readProperty(kShareProperty) != "shared" && openWith(AAUDIO_SHARING_MODE_EXCLUSIVE)) return true;
+    return openWith(AAUDIO_SHARING_MODE_SHARED);
+}
+
+bool AudioOutput::openWith(aaudio_sharing_mode_t sharing) {
     const int sampleRate = sampleRate_, channels = channels_;
+    const char* wanted = sharing == AAUDIO_SHARING_MODE_EXCLUSIVE ? "exclusive" : "shared";
     AAudioStreamBuilder* builder = nullptr;
     aaudio_result_t r = AAudio_createStreamBuilder(&builder);
     if (r != AAUDIO_OK) {
@@ -50,7 +72,7 @@ bool AudioOutput::openStream() {
     }
     AAudioStreamBuilder_setDirection(builder, AAUDIO_DIRECTION_OUTPUT);
     AAudioStreamBuilder_setPerformanceMode(builder, AAUDIO_PERFORMANCE_MODE_LOW_LATENCY);
-    AAudioStreamBuilder_setSharingMode(builder, AAUDIO_SHARING_MODE_SHARED);
+    AAudioStreamBuilder_setSharingMode(builder, sharing);
     AAudioStreamBuilder_setFormat(builder, AAUDIO_FORMAT_PCM_I16);
     AAudioStreamBuilder_setChannelCount(builder, channels);
     AAudioStreamBuilder_setSampleRate(builder, sampleRate);
@@ -61,7 +83,7 @@ bool AudioOutput::openStream() {
     r = AAudioStreamBuilder_openStream(builder, &stream_);
     AAudioStreamBuilder_delete(builder);
     if (r != AAUDIO_OK) {
-        LOGE("Audio: AAudioStreamBuilder_openStream(%d Hz, %d ch): %s", sampleRate, channels,
+        LOGW("Audio: AAudioStreamBuilder_openStream(%s, %d Hz, %d ch): %s", wanted, sampleRate, channels,
              AAudio_convertResultToText(r));
         stream_ = nullptr;
         return false;
@@ -73,28 +95,38 @@ bool AudioOutput::openStream() {
         return false;
     }
     deviceRate_ = AAudioStream_getSampleRate(stream_);
-    // Two bursts of device buffering: the least that stays glitch-free with a light callback.
-    const int32_t burst = AAudioStream_getFramesPerBurst(stream_);
-    const int32_t buffer = AAudioStream_setBufferSizeInFrames(stream_, 2 * burst);
-    bufferFrames_ = buffer > 0 ? buffer : AAudioStream_getBufferSizeInFrames(stream_);
+    exclusive_ = AAudioStream_getSharingMode(stream_) == AAUDIO_SHARING_MODE_EXCLUSIVE;
+    // The device buffer: 1 burst when exclusive, 2 through the shared mixer, one more burst each
+    // time the device reports xruns (service()), up to kMaxBufferBursts.
+    burst_ = AAudioStream_getFramesPerBurst(stream_);
+    const int requested = std::atoi(readProperty(kBurstsProperty).c_str());
+    bufferBursts_ = requested >= 1 && requested <= 8 ? requested : exclusive_ ? 1 : 2;
+    applyBufferSize();
     playout_.reset(sampleRate, channels, deviceRate_);
     framesWritten_ = 0;
     tsValid_ = false;
     restartNeeded_ = false;
     lastTimestampMicros_ = 0;
     lastXRuns_ = 0;
+    tunedXRuns_ = 0;
     r = AAudioStream_requestStart(stream_);
     if (r != AAUDIO_OK) {
-        LOGE("Audio: AAudioStream_requestStart: %s", AAudio_convertResultToText(r));
+        LOGW("Audio: AAudioStream_requestStart (%s): %s", wanted, AAudio_convertResultToText(r));
         closeStream();
         return false;
     }
-    LOGI("Audio output started: AAudio %d Hz%s, %d ch, burst %d, buffer %d frames (%.1f ms), %s, %s", deviceRate_,
-         deviceRate_ != sampleRate ? " (source rate refused: resampled linearly)" : "", channels, burst,
-         bufferFrames_.load(), 1000.0 * bufferFrames_.load() / deviceRate_,
-         performanceModeName(AAudioStream_getPerformanceMode(stream_)),
-         AAudioStream_getSharingMode(stream_) == AAUDIO_SHARING_MODE_EXCLUSIVE ? "exclusive" : "shared");
+    LOGI("Audio output started: AAudio %d Hz%s, %d ch, %s (asked %s), %s, burst %d, buffer %d bursts = %d frames "
+         "(%.1f ms), capacity %d frames",
+         deviceRate_, deviceRate_ != sampleRate ? " (source rate refused: resampled linearly)" : "", channels,
+         exclusive_ ? "exclusive" : "shared", wanted, performanceModeName(AAudioStream_getPerformanceMode(stream_)),
+         burst_, bufferBursts_, bufferFrames_.load(), 1000.0 * bufferFrames_.load() / deviceRate_,
+         AAudioStream_getBufferCapacityInFrames(stream_));
     return true;
+}
+
+void AudioOutput::applyBufferSize() {
+    const int32_t size = AAudioStream_setBufferSizeInFrames(stream_, bufferBursts_ * burst_);
+    bufferFrames_ = size > 0 ? size : AAudioStream_getBufferSizeInFrames(stream_);
 }
 
 void AudioOutput::closeStream() {
@@ -120,6 +152,18 @@ void AudioOutput::service(int64_t nowMicros) {
     if (nowMicros - lastTimestampMicros_ >= kTimestampIntervalMicros) {
         lastTimestampMicros_ = nowMicros;
         refreshTimestamp();
+        // The device ran dry (our callback was late): one more burst of buffering, the usual
+        // latency tuning, so it settles at the smallest buffer that holds.
+        const int32_t xruns = AAudioStream_getXRunCount(stream_);
+        if (xruns > tunedXRuns_) {
+            tunedXRuns_ = xruns;
+            if (bufferBursts_ < kMaxBufferBursts) {
+                ++bufferBursts_;
+                applyBufferSize();
+                LOGW("Audio: device xruns (%d so far): buffer now %d bursts (%.1f ms)", xruns, bufferBursts_,
+                     1000.0 * bufferFrames_.load() / deviceRate_);
+            }
+        }
     }
 }
 
@@ -141,8 +185,9 @@ std::string AudioOutput::describe() {
     const int32_t newXRuns = xruns >= lastXRuns_ ? xruns - lastXRuns_ : xruns;
     lastXRuns_ = xruns;
     char text[160];
-    std::snprintf(text, sizeof(text), "AAudio %d Hz %d ch, device buffer %.1f ms, device xruns %d", deviceRate_,
-                  channels_, 1000.0 * bufferFrames_.load() / deviceRate_, newXRuns);
+    std::snprintf(text, sizeof(text), "AAudio %d Hz %d ch %s, device buffer %d x %d frames (%.1f ms), device xruns %d",
+                  deviceRate_, channels_, exclusive_ ? "exclusive" : "shared", bufferBursts_, burst_,
+                  1000.0 * bufferFrames_.load() / deviceRate_, newXRuns);
     return text;
 }
 

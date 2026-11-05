@@ -78,6 +78,19 @@ import Testing
 @Test func noAudioOption() throws {
     #expect(try SenderOptions.parse([]).audio == true)
     #expect(try SenderOptions.parse(["--no-audio", "--source", "test"]).audio == false)
+    #expect(try SenderOptions.parse([]).audioSource == .auto)
+    #expect(try SenderOptions.parse(["--audio-source", "sck"]).audioSource == .sck)
+    #expect(try SenderOptions.parse(["--audio-source", "tap"]).audioSource == .tap)
+    #expect(throws: OptionError.self) { try SenderOptions.parse(["--audio-source", "mic"]) }
+    #expect(try SenderOptions.parse(["--settings", "/tmp/x.json"]).settingsPath == "/tmp/x.json")
+}
+
+@Test func outputPresentationLatency() {
+    // Measured devices: AirPods 7680 frames, Mac mini speakers 60 + 48 + 183, a monitor 88 + 576.
+    #expect(OutputLatency.micros(latencyFrames: 7680, safetyOffsetFrames: 0, streamLatencyFrames: 0, sampleRate: 48_000) == 160_000)
+    #expect(OutputLatency.micros(latencyFrames: 60, safetyOffsetFrames: 48, streamLatencyFrames: 183, sampleRate: 48_000) == 6_063)
+    #expect(OutputLatency.micros(latencyFrames: 88, safetyOffsetFrames: 576, streamLatencyFrames: 0, sampleRate: 44_100) == 15_057)
+    #expect(OutputLatency.micros(latencyFrames: 100, safetyOffsetFrames: 0, streamLatencyFrames: 0, sampleRate: 0) == 0)
 }
 
 @Test func menuStatusLine() {

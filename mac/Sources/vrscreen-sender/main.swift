@@ -36,6 +36,8 @@ var onClientChangedForMenu: ((String?) -> Void)?
 
 var testSource: TestPatternSource?
 var screenSource: ScreenSource?
+/// The Core Audio process tap, when it is the audio source (screen mode). On `queue`.
+var processTap: SystemAudioTap?
 
 var audioWanted: Bool { audioPipeline != nil && currentSettings.audio }
 
@@ -50,7 +52,40 @@ func applyAudioSettings() {
     }
     testSource?.setAudio(on)
     screenSource?.setAudioCapture(on)
-    macMute.set(on && currentSettings.muteMac && server.activeClient != nil)
+    processTap?.setRunning(on)
+    let mute = on && currentSettings.muteMac && server.activeClient != nil
+    if let processTap {
+        processTap.setMuted(mute) // the tap's own mute: nothing to restore
+    } else {
+        macMute.set(mute)
+    }
+}
+
+/// Screen mode: the process tap unless --audio-source sck or it is unavailable (logged);
+/// nil means ScreenCaptureKit audio. Exits for --audio-source tap without a tap. On `queue`.
+func makeProcessTap(_ audio: AudioPipeline) -> SystemAudioTap? {
+    let reason: String
+    switch options.audioSource {
+    case .sck:
+        log("audio: using ScreenCaptureKit (--audio-source sck)")
+        return nil
+    case .auto, .tap:
+        if #available(macOS 14.2, *) {
+            do {
+                return try ProcessTapCapture(pipeline: audio)
+            } catch {
+                reason = "\(error)"
+            }
+        } else {
+            reason = "needs macOS 14.2"
+        }
+    }
+    if options.audioSource == .tap {
+        log("audio: process tap unavailable (\(reason)) and --audio-source tap was given")
+        exit(1)
+    }
+    log("audio: process tap unavailable (\(reason)), using ScreenCaptureKit")
+    return nil
 }
 
 server.onActiveClientChanged = { address in
@@ -73,8 +108,15 @@ queue.async {
             try source.start()
             testSource = source
         case .screen:
+            // Screen-mode audio: the process tap, or ScreenCaptureKit audio in the same stream.
+            var screenAudio = audioPipeline
+            if let audio = audioPipeline {
+                audio.trackOutputLatency()
+                processTap = makeProcessTap(audio)
+                if processTap != nil { screenAudio = nil }
+            }
             let source = ScreenSource(displayIndex: options.displayIndex, fps: options.fps,
-                                      maxWidth: options.maxWidth, queue: queue, audio: audioPipeline,
+                                      maxWidth: options.maxWidth, queue: queue, audio: screenAudio,
                                       capturesAudio: audioWanted, handler: deliver)
             screenSource = source
             source.start { error in
@@ -108,6 +150,7 @@ func shutdown() {
     log("shutting down")
     CursorFreeze.release()
     macMute.set(false)
+    processTap?.invalidate()
     statsTimer.cancel()
     testSource?.stop()
     server.stop()
