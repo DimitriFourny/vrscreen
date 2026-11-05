@@ -1,84 +1,81 @@
 import AppKit
 import MirrorProtocol
+import ServiceManagement
 
-/// The menu-bar icon: connection status, curvature and dimming sliders, hand gestures,
-/// audio, re-center, reset, travel mode (USB only) and quit. Main thread only.
+/// The menu-bar icon and its menu: problems (with fixes), status, the screen sliders, the
+/// settings (Video ▸, Controls ▸), the headset on USB (Headset ▸), placement, launch at login,
+/// logs, about and quit. Every setting goes through the `SettingsModel`. Main thread only.
 final class StatusMenu: NSObject, NSMenuDelegate {
     /// Slider drags are sent at most this often (the final value always goes out).
     static let sendInterval: TimeInterval = 1.0 / 30
-    /// Settings are written to disk this long after the last change.
-    static let saveDelay: TimeInterval = 0.5
     /// Travel mode is re-read this often while the menu is open.
     static let travelModeRefreshInterval: TimeInterval = 3
 
-    /// Where the travel-mode state comes from.
-    enum TravelModeSource {
-        case adb(HeadsetAdb)
-        /// Fixed state: `.notOnUSB` (no serial, e.g. Wi-Fi only) or `.adbMissing`.
-        case unavailable(TravelModeState)
+    struct Callbacks {
+        /// RECENTER / RESET.
+        var onCommand: (ControlCommand) -> Void
+        /// A display was picked in Video ▸ Display (it also replaces --display).
+        var onDisplayChosen: (UInt32) -> Void
+        /// A fix chosen from the problem list.
+        var onProblemAction: (Problem.Action) -> Void
+        /// The menu is about to open: re-run the cheap checks.
+        var onMenuWillOpen: () -> Void
+        var onShowLogs: () -> Void
+        /// Must shut the sender down.
+        var onQuit: () -> Void
     }
 
-    private let store: DisplaySettingsStore
-    private var settings: DisplaySettings
-    private let onSettingsChange: (DisplaySettings) -> Void
-    private let onCommand: (ControlCommand) -> Void
-    private let onQuit: () -> Void
-    private let travelModeSource: TravelModeSource
+    private let model: SettingsModel
+    private let usb: UsbHeadsetLink?
+    /// False with --no-audio: the audio items are shown disabled.
+    private let audioAvailable: Bool
+    private let callbacks: Callbacks
 
     private var statusItem: NSStatusItem?
+    private let menu = NSMenu()
+    /// Problem rows at the top of the menu (rebuilt by `setProblems`).
+    private var problemItems: [NSMenuItem] = []
+    private var problems: [Problem] = []
     private let statusLine = NSMenuItem(title: StatusMenu.statusText(forClientAddress: nil), action: nil, keyEquivalent: "")
     /// "Battery: 72 % — charging" under the status line; hidden while no headset is connected.
     private let batteryLine = NSMenuItem(title: StatusMenu.batteryText(nil), action: nil, keyEquivalent: "")
+    private let travelModeLine = NSMenuItem(title: TravelModeState.notOnUSB.menuTitle, action: nil, keyEquivalent: "")
     private var curvatureRow: SliderRow?
     private var dimRow: SliderRow?
-    private var handGesturesItem: NSMenuItem?
-    private var audioItem: NSMenuItem?
-    private var muteMacItem: NSMenuItem?
-    /// False with --no-audio: the audio items are shown disabled.
-    private let audioAvailable: Bool
-    private var throttle = ValueThrottle<DisplaySettings>(interval: StatusMenu.sendInterval)
-    private var pendingSave: DispatchWorkItem?
-    private let travelModeLine = NSMenuItem(title: TravelModeState.notOnUSB.menuTitle, action: nil, keyEquivalent: "")
-    private var quickSettingsItem: NSMenuItem?
+    private var throttle = ValueThrottle<SenderSettings>(interval: StatusMenu.sendInterval)
+    /// Update checkmarks / enabled state from the settings and USB status.
+    private var refreshers: [() -> Void] = []
+    private let videoMenu = NSMenu()
+    private var displayItems: [NSMenuItem] = []
+    private var capturedDisplayID: UInt32?
+    private var usbStatus: UsbStatus?
+    private var loginItem: NSMenuItem?
     private var travelModeState: TravelModeState?
     private var travelModeQueryRunning = false
     private var travelModeTimer: DispatchSourceTimer?
 
-    /// `onSettingsChange` gets every (throttled) settings change; `onCommand` gets
-    /// RECENTER / RESET; `onQuit` must shut the sender down.
-    init(store: DisplaySettingsStore, settings: DisplaySettings, travelModeSource: TravelModeSource,
-         audioAvailable: Bool,
-         onSettingsChange: @escaping (DisplaySettings) -> Void,
-         onCommand: @escaping (ControlCommand) -> Void,
-         onQuit: @escaping () -> Void) {
-        self.store = store
-        self.settings = settings
-        self.travelModeSource = travelModeSource
+    init(model: SettingsModel, usb: UsbHeadsetLink?, audioAvailable: Bool, callbacks: Callbacks) {
+        self.model = model
+        self.usb = usb
         self.audioAvailable = audioAvailable
-        self.onSettingsChange = onSettingsChange
-        self.onCommand = onCommand
-        self.onQuit = onQuit
+        self.callbacks = callbacks
+        usbStatus = usb == nil ? UsbStatus(link: .off) : nil
     }
 
     func install() {
         let item = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
-        if let image = NSImage(systemSymbolName: "visionpro", accessibilityDescription: "VRScreen")
-            ?? NSImage(systemSymbolName: "eyeglasses", accessibilityDescription: "VRScreen") {
-            image.isTemplate = true
-            item.button?.image = image
-        } else {
-            item.button?.title = "QM"
-        }
-        item.button?.toolTip = "VRScreen"
+        statusItem = item
+        updateIcon()
 
-        let menu = NSMenu()
         menu.autoenablesItems = false
-        statusLine.isEnabled = false
-        menu.addItem(statusLine)
-        batteryLine.isEnabled = false
+        for line in [statusLine, batteryLine, travelModeLine] {
+            line.isEnabled = false
+            menu.addItem(line)
+        }
         batteryLine.isHidden = true
-        menu.addItem(batteryLine)
         menu.addItem(.separator())
+
+        let settings = model.effective
         let curvature = SliderRow(title: "Curved screen", percent: Double(settings.curvature) / 10,
                                   target: self, action: #selector(sliderMoved(_:)))
         let dim = SliderRow(title: "Dim surroundings", percent: Double(settings.dim) / 10,
@@ -90,52 +87,64 @@ final class StatusMenu: NSObject, NSMenuDelegate {
         }
         curvatureRow = curvature
         dimRow = dim
+        refreshers.append { [weak self] in
+            guard let self, let curvatureRow = self.curvatureRow, let dimRow = self.dimRow else { return }
+            let s = self.model.effective
+            curvatureRow.setPercent(Double(s.curvature) / 10)
+            dimRow.setPercent(Double(s.dim) / 10)
+        }
         menu.addItem(.separator())
-        let hands = actionItem("Hand gestures", #selector(toggleHandGestures))
-        hands.state = settings.handGestures ? .on : .off
-        hands.toolTip = "Pinch and hold to move the screen, use two hands to resize it"
-        menu.addItem(hands)
-        handGesturesItem = hands
-        let hint = NSMenuItem(title: "", action: nil, keyEquivalent: "")
-        hint.attributedTitle = NSAttributedString(
-            string: "Pinch & hold to move, two hands to resize",
-            attributes: [.font: NSFont.menuFont(ofSize: NSFont.smallSystemFontSize),
-                         .foregroundColor: NSColor.secondaryLabelColor])
-        hint.isEnabled = false
-        hint.indentationLevel = 1
-        menu.addItem(hint)
-        menu.addItem(.separator())
-        let audio = actionItem("Audio in headset", #selector(toggleAudio))
-        audio.toolTip = audioAvailable
-            ? "Play the Mac's sound in the headset"
-            : "Off: the sender was started with --no-audio"
+
+        menu.addItem(toggle("Hand gestures", \.handGestures,
+                            toolTip: "Pinch and hold to move the screen, use two hands to resize it"))
+        menu.addItem(hint("Pinch & hold to move, two hands to resize"))
+        let audio = toggle("Audio in headset", \.audio,
+                           toolTip: audioAvailable ? "Play the Mac's sound in the headset" : "Off: started with --no-audio",
+                           enabled: { [audioAvailable] _ in audioAvailable })
         menu.addItem(audio)
-        audioItem = audio
-        let muteMac = actionItem("Mute Mac while mirroring", #selector(toggleMuteMac))
-        muteMac.toolTip = "Silence the Mac's speakers while its sound goes to the headset; restored afterwards"
-        menu.addItem(muteMac)
-        muteMacItem = muteMac
-        showAudioState()
+        menu.addItem(toggle("Mute Mac while mirroring", \.muteMac,
+                            toolTip: "Silence the Mac's speakers while its sound goes to the headset; restored afterwards",
+                            enabled: { [audioAvailable] s in audioAvailable && s.audio }))
         menu.addItem(.separator())
-        menu.addItem(actionItem("Re-center", #selector(recenter)))
-        menu.addItem(actionItem("Reset placement", #selector(resetPlacement)))
+
+        menu.addItem(submenu("Video", videoMenu))
+        buildVideoMenu()
+        let controls = NSMenu()
+        menu.addItem(submenu("Controls", controls))
+        buildControlsMenu(controls)
+        let headset = NSMenu()
+        menu.addItem(submenu("Headset", headset))
+        buildHeadsetMenu(headset)
         menu.addItem(.separator())
-        travelModeLine.isEnabled = false
-        menu.addItem(travelModeLine)
-        let quickSettings = actionItem("Open Quick Settings in headset…", #selector(openQuickSettings))
-        quickSettings.isEnabled = false
-        menu.addItem(quickSettings)
-        quickSettingsItem = quickSettings
+
+        menu.addItem(button("Re-center") { [weak self] in self?.callbacks.onCommand(.recenter) })
+        menu.addItem(button("Reset placement") { [weak self] in self?.callbacks.onCommand(.reset) })
         menu.addItem(.separator())
-        menu.addItem(actionItem("Quit VRScreen", #selector(quit)))
+
+        let login = button("Launch at login") { [weak self] in self?.toggleLaunchAtLogin() }
+        menu.addItem(login)
+        loginItem = login
+        menu.addItem(.separator())
+        menu.addItem(button("Show Logs…") { [weak self] in self?.callbacks.onShowLogs() })
+        menu.addItem(button("About VRScreen") { StatusMenu.showAbout() })
+        menu.addItem(button("Quit VRScreen") { [weak self] in
+            self?.model.flushSave()
+            self?.callbacks.onQuit()
+        })
+
         menu.delegate = self
         item.menu = menu
-        statusItem = item
-        log("menu: status item installed (curvature \(settings.curvature / 10) %, dim \(settings.dim / 10) %, "
-            + "audio \(audioAvailable ? (settings.audio ? "on" : "off") : "off (--no-audio)"), "
-            + "mute Mac \(settings.muteMac ? "on" : "off"), settings in \(store.url.path))")
+        refresh()
+        log("menu: status item installed (\(model.effective.summary); settings in \(model.store.url.path))")
         refreshTravelMode()
     }
+
+    /// Opens the menu (the app was opened again from Finder).
+    func open() {
+        statusItem?.button?.performClick(nil)
+    }
+
+    // MARK: State from main
 
     /// Updates the status line (also while the menu is open). A new or no connection
     /// forgets the battery state: "Battery: —" until the headset reports it, hidden while
@@ -150,6 +159,44 @@ final class StatusMenu: NSObject, NSMenuDelegate {
     func setBattery(_ status: HeadsetStatus) {
         batteryLine.title = Self.batteryText(status)
     }
+
+    func setUsb(_ status: UsbStatus) {
+        let wasConnected = usbStatus?.isConnected ?? false
+        usbStatus = status
+        refresh()
+        if status.isConnected != wasConnected { refreshTravelMode() }
+    }
+
+    func setCapturedDisplay(_ id: UInt32?) {
+        capturedDisplayID = id
+    }
+
+    /// Rebuilds the problem rows at the top and switches the icon to its warning variant
+    /// while there are any.
+    func setProblems(_ new: [Problem]) {
+        guard new != problems else { return }
+        problems = new
+        for item in problemItems { menu.removeItem(item) }
+        problemItems = []
+        var index = 0
+        func insert(_ item: NSMenuItem) {
+            menu.insertItem(item, at: index)
+            problemItems.append(item)
+            index += 1
+        }
+        for problem in new {
+            insert(problemItem(problem))
+            for action in problem.actions {
+                let item = button(action.title) { [weak self] in self?.callbacks.onProblemAction(action) }
+                item.indentationLevel = 1
+                insert(item)
+            }
+        }
+        if !new.isEmpty { insert(.separator()) }
+        updateIcon()
+    }
+
+    // MARK: Text
 
     /// "Headset: USB (127.0.0.1)" for the adb tunnel, "Headset: Wi-Fi <ip>" otherwise.
     static func statusText(forClientAddress address: String?) -> String {
@@ -174,86 +221,320 @@ final class StatusMenu: NSObject, NSMenuDelegate {
         return text
     }
 
-    /// Writes a pending settings change now (before quitting).
-    func flushSave() {
-        guard let pendingSave else { return }
-        pendingSave.cancel()
-        self.pendingSave = nil
-        save()
-    }
+    // MARK: Building blocks
 
-    // MARK: Actions
-
-    private func actionItem(_ title: String, _ action: Selector) -> NSMenuItem {
-        let item = NSMenuItem(title: title, action: action, keyEquivalent: "")
-        item.target = self
+    private func button(_ title: String, _ handler: @escaping () -> Void) -> NSMenuItem {
+        let action = MenuAction(handler)
+        let item = NSMenuItem(title: title, action: #selector(MenuAction.run), keyEquivalent: "")
+        item.target = action
+        item.representedObject = action // NSMenuItem.target is weak
         return item
     }
 
-    @objc private func sliderMoved(_ sender: NSSlider) {
-        guard let curvatureRow, let dimRow else { return }
-        settings.curvature = DisplaySettings.permille(fromPercent: curvatureRow.slider.doubleValue)
-        settings.dim = DisplaySettings.permille(fromPercent: dimRow.slider.doubleValue)
-        curvatureRow.showValue()
-        dimRow.showValue()
-        let now = ProcessInfo.processInfo.systemUptime
-        switch throttle.submit(settings, now: now) {
-        case .send(let value):
-            onSettingsChange(value)
-        case .schedule(let at):
-            // The main queue keeps running while the menu tracks the mouse.
-            DispatchQueue.main.asyncAfter(deadline: .now() + max(0, at - now)) { [weak self] in
-                // Send the current settings (a checkbox may have changed since the drag).
-                guard let self, self.throttle.fire(now: ProcessInfo.processInfo.systemUptime) != nil else { return }
-                self.onSettingsChange(self.settings)
-            }
-        case .pending:
-            break
+    /// A checkbox bound to a Bool setting.
+    private func toggle(_ title: String, _ key: WritableKeyPath<SenderSettings, Bool>, toolTip: String? = nil,
+                        enabled: ((SenderSettings) -> Bool)? = nil) -> NSMenuItem {
+        let item = button(title) { [weak self] in
+            guard let self else { return }
+            self.model.set(key, !self.model.effective[keyPath: key])
+            self.refresh()
         }
-        scheduleSave()
+        item.toolTip = toolTip
+        refreshers.append { [weak self, weak item] in
+            guard let self, let item else { return }
+            let s = self.model.effective
+            let isEnabled = enabled?(s) ?? true
+            item.isEnabled = isEnabled
+            item.state = isEnabled && s[keyPath: key] ? .on : .off
+        }
+        return item
     }
 
-    @objc private func toggleHandGestures() {
-        settings.handGestures.toggle()
-        handGesturesItem?.state = settings.handGestures ? .on : .off
-        onSettingsChange(settings) // a single click: no throttling
-        scheduleSave()
+    /// A header and one radio item per preset; a disabled "Custom" row shows a value set on
+    /// the command line (or by hand in settings.json) that matches no preset.
+    private func choices<T: Equatable>(_ menu: NSMenu, header: String, _ key: WritableKeyPath<SenderSettings, T>,
+                                       _ options: [(label: String, value: T)], custom: @escaping (T) -> String) {
+        if menu.numberOfItems > 0 { menu.addItem(.separator()) }
+        menu.addItem(.sectionHeader(title: header))
+        var rows: [(NSMenuItem, T)] = []
+        for option in options {
+            let item = button(option.label) { [weak self] in
+                self?.model.set(key, option.value)
+                self?.refresh()
+            }
+            menu.addItem(item)
+            rows.append((item, option.value))
+        }
+        let customItem = NSMenuItem(title: "", action: nil, keyEquivalent: "")
+        customItem.isEnabled = false
+        customItem.state = .on
+        menu.addItem(customItem)
+        refreshers.append { [weak self] in
+            guard let self else { return }
+            let current = self.model.effective[keyPath: key]
+            for (item, value) in rows { item.state = value == current ? .on : .off }
+            customItem.isHidden = rows.contains { $0.1 == current }
+            customItem.title = custom(current) + (self.model.isOverridden(key) ? " (command line)" : "")
+        }
     }
 
-    @objc private func toggleAudio() {
-        settings.audio.toggle()
-        applyAudioChange()
+    private func submenu(_ title: String, _ submenu: NSMenu) -> NSMenuItem {
+        let item = NSMenuItem(title: title, action: nil, keyEquivalent: "")
+        submenu.autoenablesItems = false
+        submenu.delegate = self
+        item.submenu = submenu
+        return item
     }
 
-    @objc private func toggleMuteMac() {
-        settings.muteMac.toggle()
-        applyAudioChange()
+    private func hint(_ text: String) -> NSMenuItem {
+        let item = NSMenuItem(title: "", action: nil, keyEquivalent: "")
+        item.attributedTitle = NSAttributedString(
+            string: text,
+            attributes: [.font: NSFont.menuFont(ofSize: NSFont.smallSystemFontSize),
+                         .foregroundColor: NSColor.secondaryLabelColor])
+        item.isEnabled = false
+        item.indentationLevel = 1
+        return item
     }
 
-    private func applyAudioChange() {
-        showAudioState()
-        onSettingsChange(settings) // a single click: no throttling
-        scheduleSave()
+    /// Bold title, detail below in small secondary text, a warning symbol in front.
+    private func problemItem(_ problem: Problem) -> NSMenuItem {
+        let actions = problem.actions
+        let item = button(problem.title) { [weak self] in
+            if actions.count == 1 { self?.callbacks.onProblemAction(actions[0]) }
+        }
+        let title = NSMutableAttributedString(
+            string: problem.title,
+            attributes: [.font: NSFont.menuFont(ofSize: 0).bold, .foregroundColor: NSColor.labelColor])
+        if let detail = problem.detail {
+            title.append(NSAttributedString(
+                string: "\n" + Self.wrap(detail, width: 58),
+                attributes: [.font: NSFont.menuFont(ofSize: NSFont.smallSystemFontSize),
+                             .foregroundColor: NSColor.secondaryLabelColor]))
+        }
+        item.attributedTitle = title
+        let symbol = problem.severity == .error ? "exclamationmark.octagon.fill" : "exclamationmark.triangle.fill"
+        let color: NSColor = problem.severity == .error ? .systemRed : .systemOrange
+        item.image = NSImage(systemSymbolName: symbol, accessibilityDescription: problem.severity == .error ? "Error" : "Warning")?
+            .withSymbolConfiguration(.init(paletteColors: [.white, color]))
+        return item
     }
 
-    private func showAudioState() {
-        audioItem?.state = audioAvailable && settings.audio ? .on : .off
-        audioItem?.isEnabled = audioAvailable
-        muteMacItem?.state = settings.muteMac ? .on : .off
-        muteMacItem?.isEnabled = audioAvailable && settings.audio
+    /// Breaks `text` into lines of at most `width` characters at spaces.
+    static func wrap(_ text: String, width: Int) -> String {
+        var lines: [String] = []
+        var line = ""
+        for word in text.split(separator: " ") {
+            if !line.isEmpty && line.count + 1 + word.count > width {
+                lines.append(line)
+                line = ""
+            }
+            line += (line.isEmpty ? "" : " ") + word
+        }
+        if !line.isEmpty { lines.append(line) }
+        return lines.joined(separator: "\n")
     }
 
-    @objc private func recenter() { onCommand(.recenter) }
-    @objc private func resetPlacement() { onCommand(.reset) }
-
-    @objc private func quit() {
-        flushSave()
-        onQuit()
+    private func updateIcon() {
+        guard let button = statusItem?.button else { return }
+        let warning = !problems.isEmpty
+        if let image = Self.icon(warning: warning) {
+            button.image = image
+            button.title = ""
+        } else {
+            button.image = nil
+            button.title = warning ? "VR!" : "VR"
+        }
+        button.toolTip = warning
+            ? "VRScreen — \(problems.count) problem\(problems.count == 1 ? "" : "s"): \(problems[0].title)"
+            : "VRScreen"
     }
 
-    // MARK: Travel mode (USB only)
+    /// The Vision Pro symbol; the warning variant has a "!" badge cut into its lower right.
+    /// A template image, so it follows the menu bar's appearance.
+    static func icon(warning: Bool) -> NSImage? {
+        guard let base = NSImage(systemSymbolName: "visionpro", accessibilityDescription: "VRScreen")
+            ?? NSImage(systemSymbolName: "eyeglasses", accessibilityDescription: "VRScreen") else { return nil }
+        guard warning else {
+            base.isTemplate = true
+            return base
+        }
+        let badge: CGFloat = 9
+        let size = NSSize(width: base.size.width + 4, height: max(base.size.height, badge + 2))
+        let image = NSImage(size: size, flipped: false) { rect in
+            base.draw(in: NSRect(x: 0, y: (rect.height - base.size.height) / 2, width: base.size.width, height: base.size.height))
+            guard let context = NSGraphicsContext.current else { return false }
+            let circle = NSRect(x: rect.maxX - badge, y: 0, width: badge, height: badge)
+            // A clear ring around the badge separates it from the symbol.
+            context.compositingOperation = .clear
+            NSBezierPath(ovalIn: circle.insetBy(dx: -1.5, dy: -1.5)).fill()
+            context.compositingOperation = .sourceOver
+            NSColor.black.setFill()
+            NSBezierPath(ovalIn: circle).fill()
+            context.compositingOperation = .clear
+            NSBezierPath(roundedRect: NSRect(x: circle.midX - 0.8, y: circle.minY + 3.6, width: 1.6, height: 3.8),
+                         xRadius: 0.8, yRadius: 0.8).fill()
+            NSBezierPath(ovalIn: NSRect(x: circle.midX - 0.85, y: circle.minY + 1.3, width: 1.7, height: 1.7)).fill()
+            context.compositingOperation = .sourceOver
+            return true
+        }
+        image.isTemplate = true
+        image.accessibilityDescription = "VRScreen (problems)"
+        return image
+    }
+
+    // MARK: Submenus
+
+    private func buildVideoMenu() {
+        choices(videoMenu, header: "Resolution", \.maxWidth,
+                SenderSettings.maxWidthPresets.map { width in
+                    (label: "Up to \(width) px wide" + (width == 3840 ? " (4K)" : width == 1920 ? " (1080p)" : ""), value: width)
+                },
+                custom: { "Up to \($0) px wide" })
+        choices(videoMenu, header: "Frame rate", \.fps, SenderSettings.fpsPresets.map { (label: "\($0) fps", value: $0) },
+                custom: { "\($0) fps" })
+        choices(videoMenu, header: "Codec", \.codec, [(label: "HEVC (H.265)", value: .hevc), (label: "H.264", value: .h264)],
+                custom: { $0.rawValue })
+        choices(videoMenu, header: "Bitrate", \.bitrateMbps,
+                SenderSettings.bitratePresets.map { (label: "\(SenderSettings.format(mbps: $0)) Mbit/s", value: $0) },
+                custom: { "\(SenderSettings.format(mbps: $0)) Mbit/s" })
+        // The Display section is rebuilt when the menu opens (displays come and go).
+    }
+
+    /// The Display choices, only with more than one display.
+    private func rebuildDisplayItems() {
+        for item in displayItems { videoMenu.removeItem(item) }
+        displayItems = []
+        let screens = NSScreen.screens.compactMap { screen -> (id: UInt32, name: String)? in
+            guard let number = screen.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? NSNumber else { return nil }
+            return (number.uint32Value, screen.localizedName)
+        }
+        guard screens.count > 1 else { return }
+        let mainID = CGMainDisplayID()
+        let chosen = capturedDisplayID ?? model.effective.displayID ?? mainID
+        displayItems.append(.separator())
+        displayItems.append(.sectionHeader(title: "Display"))
+        for screen in screens {
+            let item = button(screen.name + (screen.id == mainID ? " (main)" : "")) { [weak self] in
+                self?.capturedDisplayID = nil
+                self?.callbacks.onDisplayChosen(screen.id)
+            }
+            item.state = screen.id == chosen ? .on : .off
+            displayItems.append(item)
+        }
+        for item in displayItems { videoMenu.addItem(item) }
+    }
+
+    private func buildControlsMenu(_ controls: NSMenu) {
+        controls.addItem(toggle("Keyboard shortcuts (⌃⌥⌘ + arrows, R, 0)", \.hotkeys,
+                                toolTip: "Slide, resize and re-center the screen from any app"))
+        controls.addItem(toggle("Mouse orbit & scroll zoom (⌃⌥⌘)", \.mouseGestures,
+                                toolTip: "Hold ⌃⌥⌘ and move the mouse to orbit the screen, scroll to bring it closer"))
+        choices(controls, header: "Mouse sensitivity", \.mouseSensitivity,
+                SenderSettings.mouseSensitivityPresets.map { (label: $0.label, value: $0.value) },
+                custom: { String(format: "Custom: %.3g° per point", $0) })
+        choices(controls, header: "Scroll sensitivity", \.scrollSensitivity,
+                SenderSettings.scrollSensitivityPresets.map { (label: $0.label, value: $0.value) },
+                custom: { String(format: "Custom: ×%.3g", $0) })
+    }
+
+    private func buildHeadsetMenu(_ headset: NSMenu) {
+        let linkLine = NSMenuItem(title: "", action: nil, keyEquivalent: "")
+        linkLine.isEnabled = false
+        headset.addItem(linkLine)
+        let appLine = NSMenuItem(title: "", action: nil, keyEquivalent: "")
+        appLine.isEnabled = false
+        headset.addItem(appLine)
+        let progressLine = hint("")
+        headset.addItem(progressLine)
+        let adbHint = hint("Install Android platform-tools for USB:")
+        headset.addItem(adbHint)
+        let copyCommand = button("Copy “\(Adb.installCommand)”") { StatusMenu.copyAdbInstallCommand() }
+        copyCommand.indentationLevel = 1
+        headset.addItem(copyCommand)
+        let download = button("Download Platform-Tools…") { NSWorkspace.shared.open(Adb.downloadPage) }
+        download.indentationLevel = 1
+        headset.addItem(download)
+        headset.addItem(.separator())
+        let install = button("Install headset app") { [weak self] in self?.usb?.installApp() }
+        headset.addItem(install)
+        let launch = button("Launch headset app") { [weak self] in self?.usb?.launchApp() }
+        headset.addItem(launch)
+        let quickSettings = button("Open Quick Settings (Travel mode)…") { [weak self] in self?.openQuickSettings() }
+        quickSettings.toolTip = "Travel mode can only be switched in the headset's Quick Settings"
+        headset.addItem(quickSettings)
+        let restartAdb = button("Restart adb") { [weak self] in self?.usb?.restartAdb() }
+        headset.addItem(restartAdb)
+        headset.addItem(.separator())
+        headset.addItem(toggle("Open headset app when connected", \.launchHeadsetApp,
+                               toolTip: "Start VRScreen in the headset when it is plugged in over USB",
+                               enabled: { [weak self] _ in self?.usb != nil }))
+
+        refreshers.append { [weak self] in
+            guard let self else { return }
+            let status = self.usbStatus ?? UsbStatus(link: .noHeadset)
+            let connected = status.isConnected
+            linkLine.title = status.linkText
+            appLine.title = status.appText ?? ""
+            appLine.isHidden = status.appText == nil
+            let progress = status.installing ? "Installing the headset app…" : status.installResult
+            progressLine.attributedTitle = NSAttributedString(
+                string: progress ?? "", attributes: [.font: NSFont.menuFont(ofSize: NSFont.smallSystemFontSize),
+                                                     .foregroundColor: NSColor.secondaryLabelColor])
+            progressLine.isHidden = progress == nil
+            let adbMissing = status.link == .adbMissing
+            adbHint.isHidden = !adbMissing
+            copyCommand.isHidden = !adbMissing
+            download.isHidden = !adbMissing
+            if let offer = HeadsetAppAction.offer(installed: status.app, bundled: status.bundledVersion) {
+                install.title = offer.menuTitle
+                install.isHidden = false
+            } else {
+                install.isHidden = status.bundledVersion == nil || !connected
+                install.title = "Install headset app"
+            }
+            install.isEnabled = connected && !status.installing && status.bundledVersion != nil
+            launch.isEnabled = connected && status.app != .notInstalled && !status.installing
+            quickSettings.isEnabled = connected
+            if case .adbBroken = status.link { restartAdb.isHidden = false } else { restartAdb.isHidden = !status.serverUnstable }
+        }
+    }
+
+    static func copyAdbInstallCommand() {
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(Adb.installCommand, forType: .string)
+        log("menu: copied “\(Adb.installCommand)” to the clipboard")
+    }
+
+    static func showAbout() {
+        NSApp.activate(ignoringOtherApps: true)
+        let credits = NSAttributedString(
+            string: "Mac screen mirroring for Meta Quest.\ngithub.com/DimitriFourny/vrscreen · MIT License",
+            attributes: [.font: NSFont.systemFont(ofSize: NSFont.smallSystemFontSize),
+                         .foregroundColor: NSColor.secondaryLabelColor])
+        NSApp.orderFrontStandardAboutPanel(options: [
+            .applicationName: "VRScreen",
+            .applicationVersion: AppInfo.version,
+            .version: "",
+            .credits: credits,
+        ])
+    }
+
+    // MARK: Refresh
+
+    private func refresh() {
+        for refresher in refreshers { refresher() }
+        refreshLoginItem()
+    }
+
+    func menuNeedsUpdate(_ menu: NSMenu) {
+        if menu === videoMenu { rebuildDisplayItems() }
+        refresh()
+    }
 
     func menuWillOpen(_ menu: NSMenu) {
+        guard menu === self.menu else { return }
+        callbacks.onMenuWillOpen()
         refreshTravelMode()
         let timer = DispatchSource.makeTimerSource(queue: .main) // GCD main runs during menu tracking
         timer.schedule(deadline: .now() + Self.travelModeRefreshInterval, repeating: Self.travelModeRefreshInterval)
@@ -263,44 +544,108 @@ final class StatusMenu: NSObject, NSMenuDelegate {
     }
 
     func menuDidClose(_ menu: NSMenu) {
+        guard menu === self.menu else { return }
         travelModeTimer?.cancel()
         travelModeTimer = nil
     }
 
+    // MARK: Sliders
+
+    @objc private func sliderMoved(_ sender: NSSlider) {
+        guard let curvatureRow, let dimRow else { return }
+        curvatureRow.showValue()
+        dimRow.showValue()
+        model.set(\.curvature, SenderSettings.permille(fromPercent: curvatureRow.slider.doubleValue), publish: false)
+        model.set(\.dim, SenderSettings.permille(fromPercent: dimRow.slider.doubleValue), publish: false)
+        let now = ProcessInfo.processInfo.systemUptime
+        switch throttle.submit(model.effective, now: now) {
+        case .send:
+            model.publish()
+        case .schedule(let at):
+            // The main queue keeps running while the menu tracks the mouse.
+            DispatchQueue.main.asyncAfter(deadline: .now() + max(0, at - now)) { [weak self] in
+                guard let self, self.throttle.fire(now: ProcessInfo.processInfo.systemUptime) != nil else { return }
+                self.model.publish()
+            }
+        case .pending:
+            break
+        }
+    }
+
+    // MARK: Launch at login (VRScreen.app only)
+
+    private func refreshLoginItem() {
+        guard let loginItem else { return }
+        guard AppInfo.isAppBundle else {
+            loginItem.isEnabled = false
+            loginItem.state = .off
+            loginItem.toolTip = "Only for VRScreen.app"
+            return
+        }
+        loginItem.isEnabled = true
+        switch SMAppService.mainApp.status {
+        case .enabled:
+            loginItem.state = .on
+            loginItem.title = "Launch at login"
+        case .requiresApproval:
+            loginItem.state = .mixed
+            loginItem.title = "Launch at login (approve in System Settings…)"
+        default:
+            loginItem.state = .off
+            loginItem.title = "Launch at login"
+        }
+    }
+
+    private func toggleLaunchAtLogin() {
+        let service = SMAppService.mainApp
+        do {
+            switch service.status {
+            case .enabled:
+                try service.unregister()
+                log("menu: launch at login off")
+            case .requiresApproval:
+                SMAppService.openSystemSettingsLoginItems()
+            default:
+                try service.register()
+                log("menu: launch at login on (\(service.status == .requiresApproval ? "needs approval in System Settings › General › Login Items" : "registered"))")
+                if service.status == .requiresApproval { SMAppService.openSystemSettingsLoginItems() }
+            }
+        } catch {
+            log("menu: launch at login: \(error)")
+        }
+        refreshLoginItem()
+    }
+
+    // MARK: Travel mode (USB only)
+
     /// Reads the state in the background (adb, ≤ 3 s) and updates the menu when it's back.
     private func refreshTravelMode() {
-        switch travelModeSource {
-        case .unavailable(let state):
-            apply(state)
-        case .adb(let adb):
-            guard !travelModeQueryRunning else { return }
-            travelModeQueryRunning = true
-            DispatchQueue.global().async { [weak self] in
-                adb.readTravelMode { state in
-                    DispatchQueue.main.async {
-                        self?.travelModeQueryRunning = false
-                        self?.apply(state)
-                    }
-                }
+        guard let usb else { return apply(.usbOff) }
+        if usbStatus?.link == .adbMissing { return apply(.adbMissing) }
+        guard let headset = usb.headset else { return apply(.notOnUSB) }
+        guard !travelModeQueryRunning else { return }
+        travelModeQueryRunning = true
+        DispatchQueue.global().async { [weak self] in
+            let state = headset.readTravelMode()
+            DispatchQueue.main.async {
+                self?.travelModeQueryRunning = false
+                self?.apply(state)
             }
         }
     }
 
     private func apply(_ state: TravelModeState) {
         travelModeLine.title = state.menuTitle
-        quickSettingsItem?.isEnabled = state.headsetReachable
         if state != travelModeState { log("menu: \(state.menuTitle)") }
         travelModeState = state
     }
 
-    @objc private func openQuickSettings() {
-        guard case .adb(let adb) = travelModeSource else { return }
+    private func openQuickSettings() {
+        guard let headset = usb?.headset else { return }
         DispatchQueue.global().async {
-            adb.openQuickSettings { result in
-                switch result {
-                case .success: log("menu: opened Quick Settings in the headset (tap Travel mode there)")
-                case .failure(let error): log("menu: could not open Quick Settings: \(error)")
-                }
+            switch headset.openQuickSettings() {
+            case .success: log("menu: opened Quick Settings in the headset (tap Travel mode there)")
+            case .failure(let error): log("menu: could not open Quick Settings: \(error)")
             }
         }
         // The user flips the tile in the headset; pick the new state up shortly after.
@@ -308,27 +653,21 @@ final class StatusMenu: NSObject, NSMenuDelegate {
             DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self] in self?.refreshTravelMode() }
         }
     }
+}
 
-    private func scheduleSave() {
-        pendingSave?.cancel()
-        let work = DispatchWorkItem { [weak self] in
-            self?.pendingSave = nil
-            self?.save()
-        }
-        pendingSave = work
-        DispatchQueue.main.asyncAfter(deadline: .now() + Self.saveDelay, execute: work)
+/// Target for closure-based menu items.
+private final class MenuAction: NSObject {
+    let handler: () -> Void
+
+    init(_ handler: @escaping () -> Void) {
+        self.handler = handler
     }
 
-    private func save() {
-        do {
-            try store.save(settings)
-            log("menu: curvature \(settings.curvature / 10) %, dim \(settings.dim / 10) %, "
-                + "hand gestures \(settings.handGestures ? "on" : "off"), audio \(settings.audio ? "on" : "off"), "
-                + "mute Mac \(settings.muteMac ? "on" : "off") (saved)")
-        } catch {
-            log("menu: could not save settings to \(store.url.path): \(error)")
-        }
-    }
+    @objc func run() { handler() }
+}
+
+private extension NSFont {
+    var bold: NSFont { NSFontManager.shared.convert(self, toHaveTrait: .boldFontMask) }
 }
 
 /// A menu row: title, current percentage, and a continuous 0–100 % slider.
@@ -374,6 +713,13 @@ private final class SliderRow: NSView {
 
     func showValue() {
         valueLabel.stringValue = "\(Int(slider.doubleValue.rounded())) %"
+    }
+
+    /// Follows a change made elsewhere (settings reload); a no-op while dragging to the same value.
+    func setPercent(_ percent: Double) {
+        guard abs(slider.doubleValue - percent) >= 0.05 else { return }
+        slider.doubleValue = percent
+        showValue()
     }
 }
 

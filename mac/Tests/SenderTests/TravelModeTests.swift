@@ -24,9 +24,7 @@ import Testing
 @Test func travelModeMenuState() {
     #expect(TravelModeState.on.menuTitle == "Travel mode: On")
     #expect(TravelModeState.notOnUSB.menuTitle == "Travel mode: unknown — headset not on USB")
-    #expect(TravelModeState.on.headsetReachable && TravelModeState.formatChanged.headsetReachable)
-    #expect(!TravelModeState.notOnUSB.headsetReachable && !TravelModeState.adbMissing.headsetReachable
-        && !TravelModeState.adbServerDown.headsetReachable)
+    #expect(TravelModeState.usbOff.menuTitle == "Travel mode: unknown — USB off (--no-adb)")
 }
 
 @Test func adbLookupPrefersPATH() throws {
@@ -36,10 +34,16 @@ import Testing
     let fake = dir.appendingPathComponent("adb")
     try Data("#!/bin/sh\n".utf8).write(to: fake)
     try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: fake.path)
-    #expect(HeadsetAdb.locateExecutable(environment: ["PATH": "/nonexistent:\(dir.path)", "HOME": "/nonexistent"]) == fake)
+    #expect(Adb.locate(environment: ["PATH": "/nonexistent:\(dir.path)", "HOME": "/nonexistent"])?.executable == fake)
+    // Finder-launched apps have a minimal PATH: ANDROID_HOME and ~/Library/Android/sdk count too.
+    let sdk = dir.appendingPathComponent("sdk/platform-tools")
+    try FileManager.default.createDirectory(at: sdk, withIntermediateDirectories: true)
+    try FileManager.default.copyItem(at: fake, to: sdk.appendingPathComponent("adb"))
+    #expect(Adb.locate(environment: ["PATH": "/usr/bin:/bin", "ANDROID_HOME": dir.appendingPathComponent("sdk").path,
+                                     "HOME": "/nonexistent"])?.executable == sdk.appendingPathComponent("adb"))
     // Not executable / not present → falls through to the fixed locations (absent here).
     let empty = dir.appendingPathComponent("empty")
     try FileManager.default.createDirectory(at: empty, withIntermediateDirectories: true)
-    let found = HeadsetAdb.locateExecutable(environment: ["PATH": empty.path, "HOME": "/nonexistent"])
+    let found = Adb.locate(environment: ["PATH": empty.path, "HOME": "/nonexistent"])?.executable
     #expect(found == nil || found!.path.hasPrefix("/opt/homebrew") || found!.path.hasPrefix("/usr/local"))
 }

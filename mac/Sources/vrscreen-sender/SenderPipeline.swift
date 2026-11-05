@@ -20,7 +20,7 @@ final class SenderPipeline {
     let queue: DispatchQueue
     let server: MirrorServer
     /// Owned by `encoderQueue`; never touched from `queue`.
-    private let encoder: VideoEncoder
+    private var encoder: VideoEncoder
     private let encoderQueue = DispatchQueue(label: "vrscreen.encoder", qos: .userInteractive)
 
     private struct Capture {
@@ -34,6 +34,10 @@ final class SenderPipeline {
     private var lastEncodedSequence: UInt64 = 0
     /// Frames submitted to the encoder whose output has not arrived yet.
     private var framesEncoding = 0
+    /// The last encode error, until an encode succeeds again.
+    private var encoderError: String?
+    /// Called on `queue` when the encoder starts failing (the error) or recovers (nil).
+    var onEncoderError: ((String?) -> Void)?
 
     private var stats = Stats()
     private var totalSkipped = 0
@@ -72,7 +76,7 @@ final class SenderPipeline {
         latest = Capture(buffer: buffer, captureMicros: captureMicros, sequence: captureSequence)
         // Session setup takes ~100-300 ms; do it before a client needs it. A failure
         // here resurfaces (and is logged) on the next encode.
-        encoderQueue.async { [encoder] in try? encoder.prepare(for: buffer) }
+        encoderQueue.async { [weak self] in try? self?.encoder.prepare(for: buffer) }
         stats.captured += 1
         pump()
     }
@@ -90,11 +94,32 @@ final class SenderPipeline {
         lastEncodedSequence = latest.sequence
         framesEncoding += 1
         let capture = latest
-        encoderQueue.async { [encoder, weak self] in
-            encoder.encode(capture.buffer, captureMicros: capture.captureMicros, forceKeyframe: forceKeyframe) { result in
-                self?.queue.async { self?.handleEncoded(result, for: client) }
+        encoderQueue.async { [weak self] in
+            guard let self else { return }
+            self.encoder.encode(capture.buffer, captureMicros: capture.captureMicros, forceKeyframe: forceKeyframe) { result in
+                self.queue.async { self.handleEncoded(result, for: client) }
             }
         }
+    }
+
+    /// Switches to a new encoder (codec, bitrate or frame rate changed): the old one is
+    /// flushed first, so its last outputs still go out in order; the client then gets a
+    /// keyframe, preceded by a CONFIG if the stream format changed.
+    func replaceEncoder(_ newEncoder: VideoEncoder) {
+        encoderQueue.async { [weak self] in
+            guard let self else { return }
+            self.encoder.invalidate()
+            self.encoder = newEncoder
+        }
+        server.cachedConfig = nil
+        server.activeClient?.needsKeyframe = true
+        pump()
+    }
+
+    /// Forgets the latest capture (the source restarts; its next image replaces it), so an
+    /// image from the old source is not re-encoded for a new client.
+    func discardLatestCapture() {
+        latest = nil
     }
 
     /// Flushes and tears down the encoder (blocks until pending frames finished).
@@ -102,15 +127,23 @@ final class SenderPipeline {
         encoderQueue.sync { encoder.invalidate() }
     }
 
+    private func setEncoderError(_ error: String?) {
+        guard error != encoderError else { return }
+        encoderError = error
+        onEncoderError?(error)
+    }
+
     private func handleEncoded(_ result: Result<VideoEncoder.Output?, Error>, for client: ClientSession) {
         framesEncoding -= 1
         switch result {
         case .failure(let error):
             log("encoder: \(error)")
+            setEncoderError("\(error)")
             client.needsKeyframe = true
         case .success(nil):
             break // Dropped by the encoder itself; its reference chain stays valid.
         case .success(let output?):
+            setEncoderError(nil)
             stats.encoded += 1
             if output.frame.isKeyframe { stats.keyframes += 1 }
             server.cachedConfig = output.config

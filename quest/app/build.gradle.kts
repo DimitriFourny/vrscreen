@@ -2,6 +2,13 @@ plugins {
     id("com.android.application")
 }
 
+// One version for the Mac app and the headset app: the repository's VERSION file
+// (MAJOR.MINOR.PATCH; versionCode = MAJOR * 10000 + MINOR * 100 + PATCH).
+val appVersion = rootDir.resolve("../VERSION").readText().trim()
+val appVersionCode = appVersion.split(".").map { it.toInt() }.let { (major, minor, patch) ->
+    major * 10000 + minor * 100 + patch
+}
+
 android {
     namespace = "com.df0.vrscreen"
     compileSdk = 36
@@ -12,8 +19,8 @@ android {
         applicationId = "com.df0.vrscreen"
         minSdk = 32
         targetSdk = 34
-        versionCode = 1
-        versionName = "0.2.0"
+        versionCode = appVersionCode
+        versionName = appVersion
 
         ndk {
             abiFilters += "arm64-v8a"

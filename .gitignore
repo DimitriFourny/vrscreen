@@ -4,3 +4,6 @@
 .build/
 .swiftpm/
 *.dSYM/
+
+# Built app bundles and zips (scripts/build-app.sh)
+/build/

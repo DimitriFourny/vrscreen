@@ -9,7 +9,7 @@ import ScreenCaptureKit
 /// audio capture is on. SCStream only delivers images when the screen changes;
 /// idle/blank frames are ignored. Audio buffers arrive continuously, silence included.
 final class ScreenSource: NSObject, SCStreamOutput, SCStreamDelegate {
-    private let displayIndex: Int?
+    private let selection: DisplaySelection
     private let fps: Int
     private let maxWidth: Int
     private let queue: DispatchQueue
@@ -26,15 +26,29 @@ final class ScreenSource: NSObject, SCStreamOutput, SCStreamDelegate {
     /// `handler` is called on `queue` with each captured image and its capture time
     /// (µs, host clock: the sample's presentation timestamp). Audio buffers go to `audio`
     /// on its own queue while `capturesAudio` is on.
-    init(displayIndex: Int?, fps: Int, maxWidth: Int, queue: DispatchQueue, audio: AudioPipeline?,
+    init(display: DisplaySelection, fps: Int, maxWidth: Int, queue: DispatchQueue, audio: AudioPipeline?,
          capturesAudio: Bool, handler: @escaping (CVPixelBuffer, UInt64) -> Void) {
-        self.displayIndex = displayIndex
+        self.selection = display
         self.fps = fps
         self.maxWidth = maxWidth
         self.queue = queue
         self.audio = audio
         self.capturesAudio = capturesAudio && audio != nil
         self.handler = handler
+    }
+
+    /// The captured display, once `start` succeeded.
+    var displayID: CGDirectDisplayID? { display?.displayID }
+
+    /// Whether a start error means Screen Recording is not granted.
+    static func isPermissionError(_ error: Error) -> Bool {
+        let nsError = error as NSError
+        if nsError.domain == SCStreamErrorDomain && nsError.code == SCStreamError.Code.userDeclined.rawValue { return true }
+        return error is NoDisplays
+    }
+
+    private struct NoDisplays: Error, CustomStringConvertible {
+        var description: String { "ScreenCaptureKit returned no displays (Screen Recording permission?)" }
     }
 
     /// Starts capture; `completion` gets an error (e.g. missing Screen Recording permission).
@@ -44,21 +58,30 @@ final class ScreenSource: NSObject, SCStreamOutput, SCStreamDelegate {
             self.queue.async {
                 if let error { return completion(error) }
                 guard let content, !content.displays.isEmpty else {
-                    return completion(OptionError("ScreenCaptureKit returned no displays (Screen Recording permission?)"))
+                    return completion(NoDisplays())
                 }
                 for (i, d) in content.displays.enumerated() {
                     let mode = CGDisplayCopyDisplayMode(d.displayID)
                     let main = d.displayID == CGMainDisplayID() ? " (main)" : ""
                     log("source: display \(i): id \(d.displayID), \(mode?.pixelWidth ?? d.width)x\(mode?.pixelHeight ?? d.height) px\(main)")
                 }
+                let main = content.displays.first { $0.displayID == CGMainDisplayID() } ?? content.displays[0]
                 let display: SCDisplay
-                if let index = self.displayIndex {
+                switch self.selection {
+                case .index(let index):
                     guard index < content.displays.count else {
                         return completion(OptionError("--display \(index) out of range (\(content.displays.count) displays)"))
                     }
                     display = content.displays[index]
-                } else {
-                    display = content.displays.first { $0.displayID == CGMainDisplayID() } ?? content.displays[0]
+                case .id(let id):
+                    if let chosen = content.displays.first(where: { $0.displayID == id }) {
+                        display = chosen
+                    } else {
+                        log("source: display \(id) is not connected; capturing the main display")
+                        display = main
+                    }
+                case .main:
+                    display = main
                 }
                 self.display = display
                 self.startStream(on: display, completion: completion)
@@ -76,12 +99,8 @@ final class ScreenSource: NSObject, SCStreamOutput, SCStreamDelegate {
     /// Native pixel size scaled down to fit `maxWidth`, even dimensions.
     private func computeOutputSize(for display: SCDisplay) -> (width: Int, height: Int) {
         let mode = CGDisplayCopyDisplayMode(display.displayID)
-        let nativeW = mode?.pixelWidth ?? display.width
-        let nativeH = mode?.pixelHeight ?? display.height
-        let scale = min(1, Double(maxWidth) / Double(nativeW))
-        let w = Int((Double(nativeW) * scale).rounded()) & ~1
-        let h = Int((Double(nativeH) * scale).rounded()) & ~1
-        return (max(2, w), max(2, h))
+        return VideoSettings.fit(width: mode?.pixelWidth ?? display.width, height: mode?.pixelHeight ?? display.height,
+                                 maxWidth: maxWidth)
     }
 
     private func makeConfiguration(width: Int, height: Int) -> SCStreamConfiguration {
@@ -156,10 +175,11 @@ final class ScreenSource: NSObject, SCStreamOutput, SCStreamDelegate {
 
     func stream(_ stream: SCStream, didOutputSampleBuffer sampleBuffer: CMSampleBuffer, of type: SCStreamOutputType) {
         if type == .audio {
-            if let audio { audio.handle(sampleBuffer) } // on audio.queue
+            // On audio.queue; a stopped stream's last buffers would overlap the new stream's.
+            if let audio, !stopped { audio.handle(sampleBuffer) }
             return
         }
-        guard type == .screen, sampleBuffer.isValid else { return }
+        guard type == .screen, sampleBuffer.isValid, !stopped else { return } // `stopped`: on `queue` too
         guard let attachments = CMSampleBufferGetSampleAttachmentsArray(sampleBuffer, createIfNecessary: false)
                 as? [[SCStreamFrameInfo: Any]],
               let rawStatus = attachments.first?[.status] as? Int,

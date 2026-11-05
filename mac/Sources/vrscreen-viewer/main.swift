@@ -73,6 +73,7 @@ client.onMessage = { message in
     switch message {
     case .config(let config):
         do {
+            log("config: \(config.codec) \(config.width)x\(config.height), \(config.parameterSets.count) bytes of parameter sets")
             try decoder.configure(config)
             if let window {
                 let text = "\(config.width)x\(config.height) \(config.codec) from \(client.host)"

@@ -145,7 +145,8 @@ When CONFIG is sent:
 - Right after the hello, if the sender has already encoded with the current settings.
 - Before the first FRAME of every stream (if it was not sent right after the hello).
 - Whenever the format or the parameter sets change, e.g. when the captured display's
-  resolution changes. The next FRAME after a CONFIG is always a keyframe.
+  resolution changes or the user picks another resolution, codec or bitrate in the
+  sender's menu. The next FRAME after a CONFIG is always a keyframe.
 
 A client that receives a CONFIG equal to the current one (same bytes) can ignore it.
 On a different CONFIG, it reconfigures (or recreates) its decoder and drops FRAMEs
@@ -403,9 +404,10 @@ capture → display latency = (t + offset) - captureTimeMicros
   (`video_full_range_flag = 0`, `colour_primaries = transfer_characteristics =
   matrix_coeffs = 1`). ScreenCaptureKit converts the display to sRGB/BT.709 primaries
   before encoding.
-- Size: the display's native pixel size scaled down to fit the sender's
-  `--max-width` (default 3840), aspect ratio kept, both dimensions even. A 5K display
-  is sent as 3840x2160.
+- Size: the display's native pixel size scaled down to fit the sender's maximum width
+  (menu Video ▸ Resolution or `--max-width`; default 3840), aspect ratio kept, both
+  dimensions even. A 5K display is sent as 3840x2160. Size and codec can change during a
+  connection (see "When CONFIG is sent").
 
 ## Frame timing and keyframe policy
 

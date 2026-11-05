@@ -33,7 +33,7 @@ cmake -S tests -B build/host-tests && cmake --build build/host-tests && ctest --
 
 ```sh
 adb install -r app/build/outputs/apk/debug/app-debug.apk
-../scripts/mirror.sh                              # on the Mac: the sender (see ../mac/README.md)
+../scripts/mirror.sh                              # on the Mac: the sender (or VRScreen.app, see ../README.md)
 adb shell am start -n com.df0.vrscreen/android.app.NativeActivity
 adb shell am force-stop com.df0.vrscreen       # stop
 ```

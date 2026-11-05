@@ -7,58 +7,63 @@ struct SenderOptions {
     enum AudioSource: String { case auto, tap, sck }
 
     var source: Source = .screen
+    /// --display N: SCK display index for this session (the menu's Display choice replaces it).
     var displayIndex: Int?
     var port: UInt16 = WireProtocol.defaultPort
     /// UDP port for DISCOVER/ANNOUNCE; nil with --no-discovery.
     var discoveryPort: UInt16? = DiscoveryMessage.defaultPort
-    var fps = 60
-    var maxWidth = 3840
-    var codec: VideoCodec = .hevc
-    var bitrateMbps = 30.0
     var keyframeIntervalSeconds = 5.0
     var maxFramesInFlight = 3
     var width = 1920
     var height = 1080
-    var hotkeys = true
-    var mouse = true
     var menu = true
     /// False with --no-audio: never capture or send audio, whatever the menu setting.
     var audio = true
     /// --settings: settings file instead of the standard one.
     var settingsPath: String?
     var audioSource: AudioSource = .auto
-    /// Headset on USB for the menu's travel-mode items (scripts/mirror.sh passes it).
+    /// False with --no-adb: no adb at all (Wi-Fi only).
+    var adb = true
+    /// --adb-serial: the headset to use when several adb devices are attached.
     var adbSerial: String?
-    /// Degrees of ORBIT per point of mouse movement.
-    var mouseDegreesPerPoint = 0.1
-    /// Multiplier on the scroll → DISTANCE_FINE / SIZE_FINE scaling.
-    var scrollSensitivity = 1.0
+    /// Settings given on the command line: they apply for this session only, on top of
+    /// the stored settings, until the same setting is changed in the menu.
+    var overrides = SettingsOverrides()
     /// Steps sent to every client right after it connects (testing).
     var controlOnConnect: [DebugControlStep] = []
 
     static let usage = """
     Usage: vrscreen-sender [options]
 
+    Everything the menu offers is a saved setting; these options override the saved value
+    for this session only (until it is changed in the menu):
+      --fps N                  Target frame rate (menu: 60 or 30; default 60).
+      --max-width N            Scale the display down to fit this width (menu: 3840,
+                               2560 or 1920; default 3840).
+      --codec hevc|h264        Video codec (default hevc).
+      --bitrate MBPS           Average bitrate in Mbit/s (menu: 15, 30 or 50; default 30).
+      --no-hotkeys             Do not register the global ⌃⌥⌘ screen-placement shortcuts.
+      --no-mouse               Do not use ⌃⌥⌘ + mouse (orbit) and ⌃⌥⌘ + scroll (zoom).
+      --mouse-sensitivity DEG  Orbit degrees per point of mouse movement (default 0.1).
+      --scroll-sensitivity X   Scroll zoom multiplier (default 1; a wheel notch is a
+                               quarter DISTANCE/SIZE step).
+      --no-launch              Do not start the headset app when the headset appears on USB.
+
+    Developer options:
       --source screen|test     Frame source (default screen). "test" is a synthetic
                                pattern that needs no Screen Recording permission; it
                                flashes white once per second, with a 1 kHz beep in
                                the audio at the flash.
-      --display N              Display index from the list printed at startup
-                               (default: the main display).
+      --display N              Display index from the list printed at startup (default:
+                               the display chosen in the menu, else the main display).
       --port N                 TCP listen port (default 7777).
       --discovery-port N       UDP port answering LAN discovery (default 7778).
       --no-discovery           Do not answer LAN discovery.
-      --fps N                  Target frame rate (default 60).
-      --max-width N            Scale the display down to fit this width (default 3840).
-      --codec hevc|h264        Video codec (default hevc).
-      --bitrate MBPS           Average bitrate in Mbit/s (default 30).
       --keyframe-interval S    Max seconds between keyframes (default 5).
       --max-in-flight N        For clients that send FRAME_ACK: max frames sent but
                                not yet consumed by the client (default 3).
-      --width N --height N     Test source size (default 1920x1080).
-      --no-hotkeys             Do not register the global ⌃⌥⌘ screen-placement shortcuts.
-      --no-mouse               Do not use ⌃⌥⌘ + mouse (orbit) and ⌃⌥⌘ + scroll (zoom).
-      --no-menu                No menu-bar icon (curvature, dimming, audio, re-center, quit).
+      --width N --height N     Test source size before --max-width (default 1920x1080).
+      --no-menu                No menu-bar icon.
       --no-audio               Never capture or send audio (overrides the menu's
                                "Audio in headset").
       --audio-source auto|tap|sck
@@ -69,16 +74,16 @@ struct SenderOptions {
       --settings PATH          Settings file to read and write (default
                                ~/Library/Application Support/VRScreen/settings.json),
                                e.g. for a second sender used for testing.
-      --adb-serial S           Headset on USB (adb serial) for the menu's travel-mode
-                               items; without it they show "headset not on USB".
-      --mouse-sensitivity DEG  Orbit degrees per point of mouse movement (default 0.1).
-      --scroll-sensitivity X   Scroll zoom multiplier (default 1; a wheel notch is a
-                               quarter DISTANCE/SIZE step).
+      --no-adb                 Do not use adb (no USB: the headset connects over Wi-Fi).
+      --adb-serial S           The headset's adb serial, when several devices are attached.
       --debug-control-on-connect SPEC
                                Testing: send these CONTROL commands to each client on
                                connect, e.g. "translate:1,0;orbit:500,-250;distance:-2;
                                distance_fine:25;size:1;size_fine:-50;recenter;reset".
+      --version                Print the version.
       -h, --help               Show this help.
+
+    kill -USR1 <pid> re-reads the settings file (after editing it by hand).
     """
 
     static func parse(_ args: [String]) throws -> SenderOptions {
@@ -95,7 +100,7 @@ struct SenderOptions {
         }
         func double(_ name: String) throws -> Double {
             let s = try value(name)
-            guard let v = Double(s), v > 0 else { throw OptionError("\(name): invalid value '\(s)'") }
+            guard let v = Double(s), v > 0, v.isFinite else { throw OptionError("\(name): invalid value '\(s)'") }
             return v
         }
         while let arg = it.next() {
@@ -114,21 +119,21 @@ struct SenderOptions {
                 guard let port = UInt16(exactly: p) else { throw OptionError("--discovery-port out of range") }
                 o.discoveryPort = port
             case "--no-discovery": o.discoveryPort = nil
-            case "--fps": o.fps = try int(arg)
-            case "--max-width": o.maxWidth = try int(arg, min: 16)
+            case "--fps": o.overrides.set(\.fps, min(try int(arg), 240))
+            case "--max-width": o.overrides.set(\.maxWidth, min(try int(arg, min: 16), 16_384))
             case "--codec":
                 switch try value(arg).lowercased() {
-                case "hevc", "h265": o.codec = .hevc
-                case "h264", "avc": o.codec = .h264
+                case "hevc", "h265": o.overrides.set(\.codec, .hevc)
+                case "h264", "avc": o.overrides.set(\.codec, .h264)
                 default: throw OptionError("--codec must be hevc or h264")
                 }
-            case "--bitrate": o.bitrateMbps = try double(arg)
+            case "--bitrate": o.overrides.set(\.bitrateMbps, try double(arg))
             case "--keyframe-interval": o.keyframeIntervalSeconds = try double(arg)
             case "--max-in-flight": o.maxFramesInFlight = try int(arg)
             case "--width": o.width = try int(arg, min: 16) & ~1
             case "--height": o.height = try int(arg, min: 16) & ~1
-            case "--no-hotkeys": o.hotkeys = false
-            case "--no-mouse": o.mouse = false
+            case "--no-hotkeys": o.overrides.set(\.hotkeys, false)
+            case "--no-mouse": o.overrides.set(\.mouseGestures, false)
             case "--no-menu": o.menu = false
             case "--no-audio": o.audio = false
             case "--settings": o.settingsPath = try value(arg)
@@ -136,10 +141,15 @@ struct SenderOptions {
                 let s = try value(arg)
                 guard let source = AudioSource(rawValue: s) else { throw OptionError("--audio-source must be auto, tap or sck") }
                 o.audioSource = source
+            case "--no-adb": o.adb = false
             case "--adb-serial": o.adbSerial = try value(arg)
-            case "--mouse-sensitivity": o.mouseDegreesPerPoint = try double(arg)
-            case "--scroll-sensitivity": o.scrollSensitivity = try double(arg)
+            case "--no-launch": o.overrides.set(\.launchHeadsetApp, false)
+            case "--mouse-sensitivity": o.overrides.set(\.mouseSensitivity, try double(arg))
+            case "--scroll-sensitivity": o.overrides.set(\.scrollSensitivity, try double(arg))
             case "--debug-control-on-connect": o.controlOnConnect = try parseControlSpec(try value(arg))
+            case "--version":
+                print("VRScreen \(AppInfo.version)")
+                exit(0)
             case "-h", "--help":
                 print(usage)
                 exit(0)
@@ -214,17 +224,4 @@ enum DebugControlStep: Equatable {
 struct OptionError: Error, CustomStringConvertible {
     let description: String
     init(_ d: String) { description = d }
-}
-
-func log(_ message: String) {
-    let f = DateFormatter.logFormatter
-    print("[\(f.string(from: Date()))] \(message)")
-}
-
-extension DateFormatter {
-    static let logFormatter: DateFormatter = {
-        let f = DateFormatter()
-        f.dateFormat = "HH:mm:ss.SSS"
-        return f
-    }()
 }

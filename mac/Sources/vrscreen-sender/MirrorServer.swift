@@ -71,8 +71,8 @@ final class MirrorServer {
     var cachedConfig: ConfigMessage?
     /// Steps sent to every client right after the hello (--debug-control-on-connect).
     var controlOnConnect: [DebugControlStep] = []
-    /// Curvature/dim; sent to every client right after the hello and on every change.
-    private(set) var displaySettings = DisplaySettings.defaults
+    /// Curvature, dim, hand gestures: sent to every client right after the hello and on every change.
+    private var headsetCommands = SenderSettings.defaults.commands
     /// Format of the AUDIO this sender produces; nil while audio is off. Sent to every client
     /// right after the hello (after the settings CONTROLs) and before the first AUDIO.
     var audioConfig: AudioConfigMessage?
@@ -85,6 +85,11 @@ final class MirrorServer {
     var onActiveClientChanged: ((String?) -> Void)?
     /// Called on `queue` with each HEADSET_STATUS from the active client.
     var onHeadsetStatus: ((HeadsetStatus) -> Void)?
+    /// Called on `queue` when writing to a LAN client fails with "no route to host" (what
+    /// macOS 15+ Local Network privacy produces when access is denied).
+    var onLANUnreachable: ((String) -> Void)?
+
+    var isListening: Bool { acceptSource != nil }
 
     private(set) var activeClient: ClientSession?
     private(set) var bytesSent = 0
@@ -100,7 +105,7 @@ final class MirrorServer {
 
     func start() throws {
         let fd = socket(AF_INET, SOCK_STREAM, 0)
-        guard fd >= 0 else { throw posixError("socket") }
+        guard fd >= 0 else { throw SocketError(what: "socket", port: port) }
         var one: Int32 = 1
         setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &one, socklen_t(MemoryLayout<Int32>.size))
         var addr = sockaddr_in()
@@ -112,12 +117,12 @@ final class MirrorServer {
             $0.withMemoryRebound(to: sockaddr.self, capacity: 1) { bind(fd, $0, socklen_t(MemoryLayout<sockaddr_in>.size)) }
         }
         guard bound == 0 else {
-            let error = posixError("bind port \(port)")
+            let error = SocketError(what: "bind TCP port \(port)", port: port)
             close(fd)
             throw error
         }
         guard listen(fd, 8) == 0 else {
-            let error = posixError("listen")
+            let error = SocketError(what: "listen on TCP port \(port)", port: port)
             close(fd)
             throw error
         }
@@ -179,12 +184,12 @@ final class MirrorServer {
         return client.address
     }
 
-    /// Records new settings and sends the changed value(s) to the active client.
-    func updateDisplaySettings(_ settings: DisplaySettings) {
-        let old = displaySettings
-        displaySettings = settings
+    /// Records the headset settings and sends the changed value(s) to the active client.
+    func updateHeadsetSettings(_ settings: SenderSettings) {
+        let old = headsetCommands
+        headsetCommands = settings.commands
         guard let client = activeClient else { return }
-        for (new, previous) in zip(settings.commands, old.commands) where new != previous {
+        for (new, previous) in zip(headsetCommands, old) where new != previous {
             send(.control(new), to: client)
         }
     }
@@ -217,7 +222,7 @@ final class MirrorServer {
                 client.sentConfig = config
             }
             // Absolute state the sender owns; clients apply it whenever it arrives.
-            for command in displaySettings.commands { send(.control(command), to: client) }
+            for command in headsetCommands { send(.control(command), to: client) }
             if let audioConfig {
                 send(.audioConfig(audioConfig), to: client)
                 client.sentAudioConfig = audioConfig
@@ -353,7 +358,11 @@ final class MirrorServer {
             if n < 0 {
                 if errno == EINTR { continue }
                 if errno == EAGAIN { break }
-                drop(client, reason: "write error: \(String(cString: strerror(errno)))")
+                let code = errno
+                if (code == EHOSTUNREACH || code == ENETUNREACH) && !client.address.hasPrefix("127.") {
+                    onLANUnreachable?(client.address)
+                }
+                drop(client, reason: "write error: \(String(cString: strerror(code)))")
                 return
             }
             client.pending[0].written += n
@@ -439,6 +448,18 @@ private func describe(_ storage: sockaddr_storage) -> String {
     return status == 0 ? "\(String(cString: host)):\(String(cString: service))" : "unknown"
 }
 
-private func posixError(_ what: String) -> Error {
-    OptionError("\(what) failed: \(String(cString: strerror(errno)))")
+/// A socket call failed; `addressInUse` tells "another process has the port" apart.
+struct SocketError: Error, CustomStringConvertible {
+    let what: String
+    let port: UInt16
+    let code: Int32
+
+    init(what: String, port: UInt16, code: Int32 = errno) {
+        self.what = what
+        self.port = port
+        self.code = code
+    }
+
+    var addressInUse: Bool { code == EADDRINUSE }
+    var description: String { "\(what) failed: \(String(cString: strerror(code)))" }
 }

@@ -32,8 +32,8 @@ struct MouseGestureAccumulator {
     /// A 200-point trackpad swipe is one DISTANCE/SIZE step.
     static let unitsPerTrackpadPoint = 0.5
 
-    let degreesPerPoint: Double
-    let scrollSensitivity: Double
+    var degreesPerPoint: Double
+    var scrollSensitivity: Double
     private var yaw = 0.0 // 1/100 degree
     private var pitch = 0.0
     private var distance = 0.0 // DISTANCE_FINE units
@@ -167,6 +167,12 @@ final class MouseControl {
     init(degreesPerPoint: Double, scrollSensitivity: Double, onCommands: @escaping ([ControlCommand]) -> Void) {
         accumulator = MouseGestureAccumulator(degreesPerPoint: degreesPerPoint, scrollSensitivity: scrollSensitivity)
         self.onCommands = onCommands
+    }
+
+    /// Mouse/scroll sensitivity changed in the menu.
+    func setSensitivity(degreesPerPoint: Double, scrollSensitivity: Double) {
+        accumulator.degreesPerPoint = degreesPerPoint
+        accumulator.scrollSensitivity = scrollSensitivity
     }
 
     func start() {
