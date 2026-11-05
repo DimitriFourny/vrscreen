@@ -99,9 +99,11 @@ same capture clock as the frames; it never waits for the video window, and chunk
 6. Optionally turn on **Launch at login** in the menu.
 
 **Downloaded builds** (a zip from someone else) are signed ad hoc, not notarized, so
-Gatekeeper blocks the first launch: right-click VRScreen.app → Open → Open, or run
-`xattr -dr com.apple.quarantine /Applications/VRScreen.app`. Each new build has a new
-signature, so macOS may ask for the permissions again after an update.
+Gatekeeper blocks the first launch: open it once, then System Settings → Privacy & Security →
+"VRScreen was blocked" → **Open Anyway** (right-click → Open no longer bypasses this since
+macOS 15). Or run `xattr -dr com.apple.quarantine /Applications/VRScreen.app` before the first
+launch. Each new build has a new signature, so macOS may ask for the permissions again after
+an update.
 
 ## Usage
 
