@@ -271,6 +271,15 @@ flat and the surroundings normal):
   (searching, connecting, waiting for the first frame, decoder restart) the dim is kept for 1.5 s,
   so a quick reconnect does not flash, then fades out over 0.3 s; it fades back in over 0.3 s
   once a picture is shown again. Coming back to the app (session visible again) starts undimmed.
+  **Walking lifts the dim** (`walking_detector.h`): the app is boundaryless (below), so nothing
+  else stops you from walking around a dark room. When the head moves more than 0.6 m
+  horizontally from where it was when the dim took effect, or faster than 0.5 m/s for 0.3 s once
+  it is 0.35 m or more from there, the room fades back to fully visible (0.3 s) and stays so until
+  the head has been still (< 0.1 m/s) for 2 s; then the dim fades back in and that spot becomes the
+  new reference. Logged as `Walking: undimming the surroundings` / `Settled: dim restored`.
+  Seated motion does not trigger it: leaning moves the head at most ~0.3–0.35 m (the 0.35 m gate
+  keeps a quick lean, which can briefly pass 0.5 m/s, from counting), a fast head turn moves the
+  eye point ~0.1–0.15 m at ~0.35 m/s, and tracking jitter is millimetres.
 
 Orientation: grabbing, orbiting, recenter and reset turn the screen towards your head (yaw, and
 pitch when it sits above or below eye height); it never rolls, so it stays upright (except
@@ -360,8 +369,10 @@ compared with none. Mode 0 submits the quad without any layer-settings struct.
 - `xr_math.h` — vector/quaternion helpers, `facing()` (upright, facing a point; head-up blend
   overhead/lying down), `headingOf()` (pitch-robust heading for recenter), the slide/orbit maths,
   `cylinderFor()` (cylinder pose, radius and arc for the curved screen) and `highlightFrame()`.
-- `dim_controller.h` — `DimController` (when the surroundings may be dimmed: grace, fades) and
-  `passthroughOpacity()` (perceptual SET_DIM mapping).
+- `dim_controller.h` — `DimController` (when the surroundings may be dimmed: grace, fades, not
+  while walking) and `passthroughOpacity()` (perceptual SET_DIM mapping).
+- `walking_detector.h` — `WalkingDetector`: walking vs. seated head motion, for lifting the dim
+  (host-tested).
 - `screen_source.h` — the seam between the XR shell and the content (`ScreenSource`/`ScreenHost`,
   `ScreenCommand`).
 - `mediacodec_source.{h,cpp}` — the `ScreenSource`: glues the network client to the decoder and
@@ -416,3 +427,9 @@ Runtime facts found on this Quest 3 (runtime "Oculus 209.166.0"):
   on the cylinder.
 - No projection layer is needed: frames contain only the passthrough layer and one screen layer
   (quad or cylinder), plus the highlight frame behind it while the screen is grabbed.
+- **Boundaryless**: the manifest declares `com.oculus.feature.BOUNDARYLESS_APP` (Meta's
+  boundaryless mixed-reality mode: passthrough only, no immersive content), so Horizon does not
+  pause the app with "go back inside your boundary" when you step outside the Guardian. The app
+  uses only the LOCAL and VIEW spaces, never STAGE (ill-defined without a boundary); a system
+  recenter still moves LOCAL, which the app follows by re-placing the screen. See the walking
+  rule under "Dim" for the one safety measure this needs.

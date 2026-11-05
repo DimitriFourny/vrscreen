@@ -36,10 +36,11 @@ public:
         noPictureSeconds_ = kGraceSeconds;
     }
 
-    // Advances by dt seconds and returns the dim to apply now.
-    float update(bool pictureShown, double dt) {
+    // Advances by dt seconds and returns the dim to apply now. `safe` false (the user is walking
+    // around: WalkingDetector) fades to undimmed at once, without the grace.
+    float update(bool pictureShown, bool safe, double dt) {
         noPictureSeconds_ = pictureShown ? 0.0 : noPictureSeconds_ + dt;
-        const float target = pictureShown || noPictureSeconds_ < kGraceSeconds ? requested_ : 0.0f;
+        const float target = safe && (pictureShown || noPictureSeconds_ < kGraceSeconds) ? requested_ : 0.0f;
         const float step = static_cast<float>(dt / kFadeSeconds);
         if (current_ < target) current_ = current_ + step < target ? current_ + step : target;
         if (current_ > target) current_ = current_ - step > target ? current_ - step : target;

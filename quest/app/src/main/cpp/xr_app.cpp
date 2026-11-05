@@ -1242,6 +1242,7 @@ void XrApp::renderFrame() {
     if (recenterAtTime_ != 0 && frameState.predictedDisplayTime >= recenterAtTime_) {
         recenterRequested_ = true;
         recenterAtTime_ = 0;
+        walking_.reset();  // the LOCAL origin moved: head positions jump
     }
     if (recenterRequested_ && recenter(frameState.predictedDisplayTime)) recenterRequested_ = false;
     updateGrabs(dt, frameState.predictedDisplayTime);
@@ -1256,8 +1257,23 @@ void XrApp::renderFrame() {
     }
 
     const bool picture = source_.pictureReady();
-    // Dim the surroundings only while the screen shows a picture (DimController: grace + fades).
-    setPassthroughOpacity(passthroughOpacity(dimmer_.update(picture && visible_, dt), dimGamma_));
+    // Boundaryless app: lift the dim while the user walks around, restore it once they settle.
+    if (headValid_) {
+        const bool dimInEffect = dimmer_.requested() > 0.0f && picture && visible_;
+        switch (walking_.update(headPose_.position.x, headPose_.position.z, dt, dimInEffect)) {
+            case WalkingDetector::Event::Walking:
+                LOGI("Walking: undimming the surroundings (head %.2f m/s)", walking_.speed());
+                break;
+            case WalkingDetector::Event::Settled:
+                LOGI("Settled: dim restored");
+                break;
+            case WalkingDetector::Event::None:
+                break;
+        }
+    }
+    // Dim the surroundings only while the screen shows a picture (DimController: grace + fades)
+    // and the user is not walking.
+    setPassthroughOpacity(passthroughOpacity(dimmer_.update(picture && visible_, !walking_.walking(), dt), dimGamma_));
     // Draw only when the panel is submitted this frame: a runtime that consumes buffers only from
     // composited layers would otherwise fill the queue and block ANativeWindow_lock.
     const bool statusSubmitted = visible_ && frameState.shouldRender && quadPlaced_ && !picture;

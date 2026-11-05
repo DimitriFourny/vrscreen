@@ -6,6 +6,7 @@
 #include "hand_tracker.h"
 #include "screen_source.h"
 #include "status_panel.h"
+#include "walking_detector.h"
 
 #include <EGL/egl.h>
 #include <android/native_activity.h>
@@ -181,6 +182,7 @@ private:
     bool hasCylinder_ = false;  // XR_KHR_composition_layer_cylinder enabled
     float curvature_ = 0.0f;    // 0 flat .. 1 cylinder centred on the viewer
     DimController dimmer_;         // wanted dim (SET_DIM) vs. what is shown (only with a picture)
+    WalkingDetector walking_;      // lifts the dim while the user walks around (boundaryless app)
     float appliedOpacity_ = 1.0f;  // passthrough style currently set
     float dimGamma_ = kDimGamma;   // debug.vrscreen.dimgamma overrides it for tuning
     PFN_xrPassthroughLayerSetStyleFB pfnPassthroughLayerSetStyleFB = nullptr;

@@ -1,11 +1,13 @@
 // Host unit tests: hand-gesture state machine, pose filter, facing()/headingOf() near the zenith,
-// highlight geometry, protocol hello/discovery framing, HEADSET_STATUS (the audio playout is in
-// audio_tests.cpp).
+// highlight geometry, protocol hello/discovery framing, HEADSET_STATUS, the walking detector that
+// lifts the dim (the audio playout is in audio_tests.cpp).
 
+#include "dim_controller.h"
 #include "grab.h"
 #include "hand_gestures.h"
 #include "headset_status.h"
 #include "test_support.h"
+#include "walking_detector.h"
 #include "wire.h"
 #include "xr_math.h"
 
@@ -646,6 +648,112 @@ TEST(headsetStatusSentOnConnectChangeAndEveryMinute) {
     CHECK(r.shouldSend(lower, 72'000'000));     // 60 s heartbeat
     r.reset();                                  // new connection
     CHECK(r.shouldSend(lower, 72'100'000));
+}
+
+// ---- Walking detector (boundaryless safety for the dim) ----------------------------------------
+
+// Feeds a head trajectory (x, z as functions of time) at 72 Hz; returns the events with times.
+struct WalkRun {
+    WalkingDetector detector;
+    double t = 0.0;
+    std::vector<std::pair<double, WalkingDetector::Event>> events;
+    void run(double seconds, const std::function<std::pair<double, double>(double)>& head, bool dim = true) {
+        const double end = t + seconds;
+        while (t < end) {
+            t += kDt;
+            const auto [x, z] = head(t);
+            const WalkingDetector::Event e = detector.update(x, z, kDt, dim);
+            if (e != WalkingDetector::Event::None) events.push_back({t, e});
+        }
+    }
+};
+
+// Smooth 0 -> 1 over [t0, t0 + duration] (cosine ease, peak speed pi/2 / duration).
+double ease(double t, double t0, double duration) {
+    if (t <= t0) return 0.0;
+    if (t >= t0 + duration) return 1.0;
+    return 0.5 - 0.5 * std::cos(3.14159265 * (t - t0) / duration);
+}
+
+TEST(walkingSeatedMotionNeverTriggers) {
+    WalkRun r;
+    uint32_t seed = 7;
+    auto jitter = [&seed]() {
+        seed = seed * 1664525u + 1013904223u;
+        return ((seed >> 8) % 4001) / 1e6 - 0.002;  // +-2 mm tracking noise
+    };
+    r.run(1.0, [&](double) { return std::make_pair(jitter(), jitter()); });
+    // A quick lean forward by 0.33 m in 0.4 s (peak 1.3 m/s), held, then back.
+    r.run(3.0, [&](double t) { return std::make_pair(jitter(), -0.33 * (ease(t, 1.2, 0.4) - ease(t, 3.0, 0.5))); });
+    // A sideways lean to reach something: 0.3 m in 0.5 s and back.
+    r.run(3.0, [&](double t) { return std::make_pair(0.3 * (ease(t, 4.2, 0.5) - ease(t, 5.5, 0.5)), jitter()); });
+    // Fast head turns: the eye point, 0.1 m in front of the neck, swings 90 deg in 0.25 s and back.
+    r.run(3.0, [&](double t) {
+        const double a = 1.5708 * (ease(t, 7.2, 0.25) - ease(t, 8.5, 0.25));
+        return std::make_pair(0.1 * std::sin(a), -0.1 * std::cos(a) + 0.1);
+    });
+    CHECK(r.events.empty());
+    CHECK(!r.detector.walking());
+}
+
+TEST(walkingTriggersWithinTheFirstStep) {
+    WalkRun r;
+    r.run(1.0, [](double) { return std::make_pair(0.0, 0.0); });
+    r.run(3.0, [](double t) { return std::make_pair(0.0, -1.0 * (t - 1.0)); });  // 1 m/s
+    CHECK(!r.events.empty());
+    CHECK(r.events[0].second == WalkingDetector::Event::Walking);
+    // Speed test: displaced 0.35 m at > 0.5 m/s for 0.3 s -> well before the 0.6 m drift.
+    CHECK(r.events[0].first > 1.3 && r.events[0].first < 1.5);
+    CHECK(r.detector.walking());
+}
+
+TEST(walkingSlowDriftTriggersAtSixtyCentimetres) {
+    WalkRun r;
+    r.run(6.0, [](double t) { return std::make_pair(0.2 * t, 0.0); });  // 0.2 m/s: shuffling away
+    CHECK(r.events.size() == 1);
+    CHECK_NEAR(r.events[0].first, 3.0, 0.05);  // 0.6 m
+}
+
+TEST(walkingSettlesAfterTwoStillSecondsAndReanchors) {
+    WalkRun r;
+    r.run(1.0, [](double) { return std::make_pair(0.0, 0.0); });
+    r.run(2.0, [](double t) { return std::make_pair(0.0, -std::min(1.0 * (t - 1.0), 2.0)); });  // walk 2 m
+    CHECK(r.detector.walking());
+    // Still walking around at the new place: no settle.
+    r.run(3.0, [](double t) { return std::make_pair(0.3 * std::sin(2.0 * t), -2.0); });
+    CHECK(r.detector.walking());
+    // Sits down (still): settled after ~2 s of < 0.1 m/s.
+    const double stopped = r.t;
+    r.run(4.0, [](double) { return std::make_pair(0.0, -2.0); });
+    CHECK(r.events.size() == 2 && r.events[1].second == WalkingDetector::Event::Settled);
+    CHECK(r.events[1].first - stopped > 2.0 && r.events[1].first - stopped < 2.6);
+    // Re-anchored there: a seated lean from the new spot does not trigger.
+    const double t0 = r.t;
+    r.run(3.0, [t0](double t) { return std::make_pair(0.0, -2.0 - 0.3 * ease(t, t0 + 0.5, 0.4)); });
+    CHECK(r.events.size() == 2);
+}
+
+TEST(walkingWithoutDimDoesNothing) {
+    WalkRun r;
+    r.run(5.0, [](double t) { return std::make_pair(0.0, -1.0 * t); }, false);
+    CHECK(r.events.empty() && !r.detector.walking());
+    // The dim taking effect anchors where the head is then (already 5 m away).
+    r.run(2.0, [](double) { return std::make_pair(0.0, -5.0); }, true);
+    CHECK(r.events.empty() && !r.detector.walking());
+}
+
+TEST(dimLiftsAtOnceWhileWalkingAndFadesBack) {
+    DimController d;
+    d.setRequested(0.8f);
+    float v = 0.0f;
+    for (int i = 0; i < 72; ++i) v = d.update(true, true, kDt);
+    CHECK_NEAR(v, 0.8, 1e-6);
+    // Walking: no grace, fades out within kFadeSeconds x 0.8.
+    for (int i = 0; i < 18; ++i) v = d.update(true, false, kDt);  // 0.25 s
+    CHECK_NEAR(v, 0.0, 1e-6);
+    // Settled: back to 0.8 over the fade.
+    for (int i = 0; i < 18; ++i) v = d.update(true, true, kDt);
+    CHECK_NEAR(v, 0.8, 1e-6);
 }
 
 }  // namespace
